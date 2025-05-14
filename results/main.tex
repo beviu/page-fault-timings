@@ -1,0 +1,49 @@
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+
+\usetikzlibrary{external}
+
+\tikzexternalize
+
+\pgfplotsset{compat=1.18}
+
+\newcommand{\addstackedplots}[1]{
+        \pgfplotstableread[col sep=comma]{#1}{\table}
+        \pgfplotstablegetcolsof{\table}
+		\pgfmathtruncatemacro\lastcolindex{\pgfplotsretval-1}
+        \pgfplotsinvokeforeach{0,...,\lastcolindex}{
+            \pgfplotstablegetcolumnnamebyindex{##1}\of{\table}\to{\colname}
+            \addplot table [x expr=\coordindex,y index=##1] {\table}
+                \closedcycle;
+            \addlegendentryexpanded{\detokenize\expandafter{\colname}}
+        }
+    }
+
+\newcommand{\timingschart}[1]{%
+\begin{tikzpicture}
+	\begin{axis}[
+			title=#1,
+			xlabel={Iteration},
+			ylabel={Cycle count (TSC)},
+			legend style={font=\tiny},
+			ymin=0,
+			ymax=8000,
+			stack plots=y,
+			area style,
+			width=\textwidth,
+			height=.4\textheight,
+		]
+		\addstackedplots{#1}
+	\end{axis}
+\end{tikzpicture}%
+}
+
+\begin{document}
+\timingschart{extmem-read-stacked-small.csv}
+\timingschart{extmem-write-stacked-small.csv}
+\timingschart{extmem-rw-stacked-small.csv}
+\end{document}
