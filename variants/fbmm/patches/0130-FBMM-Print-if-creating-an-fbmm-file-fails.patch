@@ -1,0 +1,65 @@
+From 81c5afc31d555260849473913393e1a88ebf9894 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Tue, 12 Dec 2023 11:38:15 -0600
+Subject: [PATCH 130/179] FBMM: Print if creating an fbmm file fails
+
+---
+ mm/file_based_mm.c | 6 +++---
+ mm/mmap.c          | 5 ++++-
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 57cafe4de965..fcba6f20804b 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -211,7 +211,7 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
+ 	struct file *f;
+ 	int open_flags = O_EXCL | O_TMPFILE;
+ 	umode_t open_mode = 0;
+-	int ret = 0;
++	s64 ret = 0;
+ 	u64 start_time = rdtsc();
+ 	u64 end_time;
+ 
+@@ -236,13 +236,13 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
+ 
+ 	f = filp_open(file_dir, open_flags, open_mode);
+ 	if (IS_ERR(f))
+-		return NULL;
++		return f;
+ 
+ 	// Set the file to the correct size
+ 	ret = truncate_fbmm_file(f, len, flags);
+ 	if (ret) {
+ 		filp_close(f, current->files);
+-		return NULL;
++		return (struct file *)ret;
+ 	}
+ 
+ 	end_time = rdtsc();
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 07167a9a3373..6fa4a1da3f00 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1297,7 +1297,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current->tgid)) {
+ 		file = fbmm_create_new_file(len, prot, flags);
+ 
+-		if (file) {
++		if (file && !IS_ERR(file)) {
+ 			created_fbmm_file = true;
+ 			flags = flags & ~MAP_ANONYMOUS;
+ 
+@@ -1307,6 +1307,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 				flags = flags & ~MAP_PRIVATE;
+ 				flags = flags | MAP_SHARED;
+ 			}
++		} else {
++			pr_err("Failed to create fbmm file: %ld\n", (long)file);
++			file = NULL;
+ 		}
+ 	}
+ 
+-- 
+2.49.0
+

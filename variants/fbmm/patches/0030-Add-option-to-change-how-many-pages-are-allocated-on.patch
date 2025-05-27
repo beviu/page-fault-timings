@@ -1,0 +1,99 @@
+From 4efe698cd86a2d293605a3edc8b2f3ec476e762e Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Fri, 25 Feb 2022 18:42:24 -0600
+Subject: [PATCH 030/179] Add option to change how many pages are allocated on
+ dax pte faults
+
+---
+ fs/dax.c           |  3 ++-
+ mm/file_only_mem.c | 32 ++++++++++++++++++++++++++++++++
+ mm/huge_memory.c   |  4 ++--
+ 3 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/fs/dax.c b/fs/dax.c
+index 2ababb89918d..552f925b131d 100644
+--- a/fs/dax.c
++++ b/fs/dax.c
+@@ -1707,6 +1707,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
+ 	return vmf_insert_mixed(vmf->vma, vmf->address, pfn);
+ }
+ 
++extern int fom_dax_pte_fault_size;
+ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
+ 			       int *iomap_errp, const struct iomap_ops *ops)
+ {
+@@ -1715,7 +1716,7 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
+ 	struct iomap_iter iter = {
+ 		.inode		= mapping->host,
+ 		.pos		= (loff_t)vmf->pgoff << PAGE_SHIFT,
+-		.len		= PAGE_SIZE,
++		.len		= fom_dax_pte_fault_size * PAGE_SIZE,
+ 		.flags		= IOMAP_DAX | IOMAP_FAULT,
+ 	};
+ 	vm_fault_t ret = 0;
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index c3378a74c2ff..04a167164e6b 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -588,11 +588,43 @@ static ssize_t fom_stats_store(struct kobject *kobj,
+ static struct kobj_attribute fom_stats_attribute =
+ __ATTR(stats, 0644, fom_stats_show, fom_stats_store);
+ 
++int fom_dax_pte_fault_size = 1;
++static ssize_t fom_dax_pte_fault_size_show(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", fom_dax_pte_fault_size);
++}
++
++static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
++		struct kobj_attribute *attr,
++		const char *buf, size_t count)
++{
++	int fault_size;
++	int ret;
++
++	ret = kstrtoint(buf, 0, &fault_size);
++
++	if (ret != 0) {
++		fom_dax_pte_fault_size = 1;
++		return ret;
++	}
++
++	if (fault_size > 0)
++		fom_dax_pte_fault_size = fault_size;
++	else
++		fom_dax_pte_fault_size = 1;
++
++	return count;
++}
++static struct kobj_attribute fom_dax_pte_fault_size_attribute =
++__ATTR(pte_fault_size, 0644, fom_dax_pte_fault_size_show, fom_dax_pte_fault_size_store);
++
+ static struct attribute *file_only_mem_attr[] = {
+ 	&fom_state_attribute.attr,
+ 	&fom_pid_attribute.attr,
+ 	&fom_file_dir_attribute.attr,
+ 	&fom_stats_attribute.attr,
++	&fom_dax_pte_fault_size_attribute.attr,
+ 	NULL,
+ };
+ 
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 0c1ab7f7c102..be944e9e1cf1 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -92,8 +92,8 @@ bool hugepage_vma_check(struct vm_area_struct *vma, unsigned long vm_flags,
+ 		return false;
+ 
+ 	/* khugepaged doesn't collapse DAX vma, but page fault is fine. */
+-	if (vma_is_dax(vma))
+-		return in_pf;
++	//if (vma_is_dax(vma))
++	//	return in_pf;
+ 
+ 	/*
+ 	 * Special VMA and hugetlb VMA.
+-- 
+2.49.0
+

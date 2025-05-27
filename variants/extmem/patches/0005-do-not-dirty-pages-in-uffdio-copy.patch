@@ -1,0 +1,33 @@
+From 9d6961425d35b9b945ce716c6da4abc629317b73 Mon Sep 17 00:00:00 2001
+From: SepehrDV2 <sepehr.jalalian.edu@gmail.com>
+Date: Wed, 13 Dec 2023 00:47:25 -0800
+Subject: [PATCH 05/14] do not dirty pages in uffdio copy
+
+---
+ mm/userfaultfd.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/mm/userfaultfd.c b/mm/userfaultfd.c
+index ee093bd39312..33b1e9a06a39 100644
+--- a/mm/userfaultfd.c
++++ b/mm/userfaultfd.c
+@@ -91,6 +91,7 @@ int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
+ 	bool writable = dst_vma->vm_flags & VM_WRITE;
+ 	bool vm_shared = dst_vma->vm_flags & VM_SHARED;
+ 	bool page_in_cache = page_mapping(page);
++	bool is_anon = vma_is_anonymous(dst_vma);
+ 	spinlock_t *ptl;
+ 	struct inode *inode;
+ 	pgoff_t offset, max_off;
+@@ -98,7 +99,7 @@ int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
+ 	_dst_pte = mk_pte(page, dst_vma->vm_page_prot);
+ 	if (page_in_cache && !vm_shared)
+ 		writable = false;
+-	if (writable || !page_in_cache)
++	if ((writable || !page_in_cache) && (!is_anon))
+ 		_dst_pte = pte_mkdirty(_dst_pte);
+ 	if (writable) {
+ 		if (wp_copy)
+-- 
+2.49.0
+

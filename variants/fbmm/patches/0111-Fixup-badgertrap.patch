@@ -1,0 +1,127 @@
+From b40ee705d913b311692ba488557c383680d60ec2 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Mon, 16 Oct 2023 16:08:59 -0500
+Subject: [PATCH 111/179] Fixup badgertrap
+
+This includes masking the badgertrap bit in the pte_pfn function.
+The bit used by badger trap is valid for a PFN if a machine supports
+52 bits of physicall memory. Our machines currently do not, so it's
+not much of an issue.
+---
+ arch/x86/include/asm/pgtable.h |  1 +
+ mm/memory.c                    | 80 +++++++++++++++++-----------------
+ 2 files changed, 41 insertions(+), 40 deletions(-)
+
+diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
+index 0564edd24ffb..1f48db3684a7 100644
+--- a/arch/x86/include/asm/pgtable.h
++++ b/arch/x86/include/asm/pgtable.h
+@@ -188,6 +188,7 @@ static inline unsigned long pte_pfn(pte_t pte)
+ {
+ 	phys_addr_t pfn = pte_val(pte);
+ 	pfn ^= protnone_mask(pfn);
++	pfn &= ~(_AT(pteval_t, 1) << 51);
+ 	return (pfn & PTE_PFN_MASK) >> PAGE_SHIFT;
+ }
+ 
+diff --git a/mm/memory.c b/mm/memory.c
+index 8c6a7015e2f5..b9794286c9f1 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -4985,46 +4985,6 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+ 	struct mm_struct *mm = vma->vm_mm;
+ 	pte_t* page_table;
+ 
+-	if(mm && mm->badger_trap_en && (vmf->flags & FAULT_FLAG_INSTRUCTION))
+-	{
+-                if(is_pte_reserved(*vmf->pte))
+-                        *vmf->pte = pte_unreserve(*vmf->pte);
+-	}
+-
+-	/* We need to figure out if the page fault is a fake page fault or not.
+- 	 * If it is a fake page fault, we need to handle it specially. It has to
+- 	 * be made sure that the special page fault is not on instruction fault.
+- 	 * Our technique cannot not handle instruction page fault yet.
+- 	 *
+- 	 * We can have two cases when we have a fake page fault:
+- 	 * 1. We have taken a fake page fault on a COW page. A 
+- 	 * 	fake page fault on a COW page if for reading only
+- 	 * 	has to be considered a normal fake page fault. But
+- 	 * 	for writing purposes need to be handled correctly.
+- 	 * 2. We have taken a fake page fault on a normal page.
+- 	 */
+-	if(mm && mm->badger_trap_en && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)) && pte_present(*vmf->pte))
+-	{
+-		page_table = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
+-		entry = *page_table;
+-		if((vmf->flags & FAULT_FLAG_WRITE) && is_pte_reserved(entry) && !pte_write(entry))
+-		{
+-			pte_unmap_unlock(page_table, vmf->ptl);
+-			vmf->ptl = pte_lockptr(mm,vmf->pmd);
+-			spin_lock(vmf->ptl);
+-			entry = *vmf->pte;
+-			return do_wp_page(vmf);
+-		}
+-		else if(is_pte_reserved(entry))
+-		{
+-			return do_fake_page_fault(mm, vmf->vma, vmf->address,
+-						 page_table, vmf->pmd, vmf->flags, vmf->ptl);
+-		}
+-
+-		*page_table = pte_mkreserve(*page_table);
+-		pte_unmap_unlock(page_table, vmf->ptl);
+-	}
+-
+ 	if (unlikely(pmd_none(*vmf->pmd))) {
+ 		/*
+ 		 * Leave __pte_alloc() until later: because vm_ops->fault may
+@@ -5081,6 +5041,46 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+ 			return do_fault(vmf);
+ 	}
+ 
++	if(mm && mm->badger_trap_en && (vmf->flags & FAULT_FLAG_INSTRUCTION))
++	{
++                if(is_pte_reserved(*vmf->pte))
++                        *vmf->pte = pte_unreserve(*vmf->pte);
++	}
++
++	/* We need to figure out if the page fault is a fake page fault or not.
++ 	 * If it is a fake page fault, we need to handle it specially. It has to
++ 	 * be made sure that the special page fault is not on instruction fault.
++ 	 * Our technique cannot not handle instruction page fault yet.
++ 	 *
++ 	 * We can have two cases when we have a fake page fault:
++ 	 * 1. We have taken a fake page fault on a COW page. A 
++ 	 * 	fake page fault on a COW page if for reading only
++ 	 * 	has to be considered a normal fake page fault. But
++ 	 * 	for writing purposes need to be handled correctly.
++ 	 * 2. We have taken a fake page fault on a normal page.
++ 	 */
++	if(mm && mm->badger_trap_en && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)) && pte_present(*vmf->pte))
++	{
++		page_table = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
++		entry = *page_table;
++		if((vmf->flags & FAULT_FLAG_WRITE) && is_pte_reserved(entry) && !pte_write(entry))
++		{
++			pte_unmap_unlock(page_table, vmf->ptl);
++			vmf->ptl = pte_lockptr(mm,vmf->pmd);
++			spin_lock(vmf->ptl);
++			entry = *vmf->pte;
++			return do_wp_page(vmf);
++		}
++		else if(is_pte_reserved(entry))
++		{
++			return do_fake_page_fault(mm, vmf->vma, vmf->address,
++						 page_table, vmf->pmd, vmf->flags, vmf->ptl);
++		}
++
++		*page_table = pte_mkreserve(*page_table);
++		pte_unmap_unlock(page_table, vmf->ptl);
++	}
++
+ 	if (!pte_present(vmf->orig_pte))
+ 		return do_swap_page(vmf);
+ 
+-- 
+2.49.0
+

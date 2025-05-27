@@ -1,0 +1,172 @@
+From 4ae53616736913e70c2b96fc1551966b4d3b8fa6 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Tue, 19 Apr 2022 18:17:48 -0500
+Subject: [PATCH 039/179] Add WRITE_ZEROES option for the pmem driver
+
+---
+ arch/x86/include/asm/string_64.h |  2 ++
+ arch/x86/lib/usercopy_64.c       | 57 ++++++++++++++++++++++++++++++++
+ drivers/nvdimm/pmem.c            | 43 ++++++++++++++++++------
+ 3 files changed, 92 insertions(+), 10 deletions(-)
+
+diff --git a/arch/x86/include/asm/string_64.h b/arch/x86/include/asm/string_64.h
+index 888731ccf1f6..f696eb817057 100644
+--- a/arch/x86/include/asm/string_64.h
++++ b/arch/x86/include/asm/string_64.h
+@@ -125,6 +125,8 @@ static __always_inline void memcpy_flushcache(void *dst, const void *src, size_t
+ 	}
+ 	__memcpy_flushcache(dst, src, cnt);
+ }
++
++void memset_flushcache(void *dst, uint8_t data, size_t len);
+ #endif
+ 
+ #endif /* __KERNEL__ */
+diff --git a/arch/x86/lib/usercopy_64.c b/arch/x86/lib/usercopy_64.c
+index 6c1f8ac5e721..426b4368062d 100644
+--- a/arch/x86/lib/usercopy_64.c
++++ b/arch/x86/lib/usercopy_64.c
+@@ -137,6 +137,63 @@ void __memcpy_flushcache(void *_dst, const void *_src, size_t size)
+ }
+ EXPORT_SYMBOL_GPL(__memcpy_flushcache);
+ 
++void memset_flushcache(void *dst, uint8_t data, size_t len) {
++	uint64_t dest = (uint64_t) dst;
++	uint16_t half_word = (data << 8) | data;
++	uint32_t word = (half_word << 16) | half_word;
++	uint64_t dword = (word << 32) | word;
++
++	/* Check for alignment */
++	if (!IS_ALIGNED(dest, 8)) {
++		unsigned l = min_t(unsigned, len, ALIGN(dest, 8) - dest);
++
++		memset(dest, data, l);
++		clean_cache_range((void *)dest, l);
++		dest += l;
++		len -= l;
++		if (!len)
++			return;
++	}
++
++	while (len >= 32) {
++		asm("movq %1, %%r8\n"
++			"movnti %%r8, (%0)\n"
++			"movnti %%r8, 8(%0)\n"
++			"movnti %%r8, 16(%0)\n"
++			"movnti %%r8, 24(%0)\n"
++			:: "r" (dest), "r" (dword)
++			: "memory", "r8"
++		);
++		dest += 32;
++		len -= 32;
++	}
++
++	while (len >= 8) {
++		asm("movq %1, %%r8\n"
++			"movnti %%r8, (%0)\n"
++			:: "r" (dest), "r" (dword)
++			: "memory", "r8"
++		);
++		dest += 8;
++		len -= 8;
++	}
++
++	while (len >= 4) {
++		asm("movl %1, %%r8d\n"
++			"movnti %%r8d, (%0)\n"
++			:: "r" (dest), "r" (word)
++			: "memory", "r8"
++		);
++		dest += 4;
++		len -= 4;
++	}
++
++	if (len) {
++		memset((void *)dest, data, len);
++		clean_cache_range((void *)dest, len);
++	}
++}
++
+ void memcpy_page_flushcache(char *to, struct page *page, size_t offset,
+ 		size_t len)
+ {
+diff --git a/drivers/nvdimm/pmem.c b/drivers/nvdimm/pmem.c
+index 96e6e9a5f235..545ac003cef2 100644
+--- a/drivers/nvdimm/pmem.c
++++ b/drivers/nvdimm/pmem.c
+@@ -197,6 +197,21 @@ static blk_status_t pmem_do_write(struct pmem_device *pmem,
+ 	return BLK_STS_OK;
+ }
+ 
++static blk_status_t pmem_do_zero(struct pmem_device *pmem,
++			sector_t sector, unsigned long len)
++{
++	blk_status_t rc = BLK_STS_OK;
++	phys_addr_t pmem_off = sector * 512 + pmem->data_offset;
++	void *pmem_addr = pmem->virt_addr + pmem_off;
++
++	if (unlikely(is_bad_pmem(&pmem->bb, sector, len)))
++		return BLK_STS_IOERR;
++
++	memset_flushcache(pmem_addr, 0, len);
++
++	return rc;
++}
++
+ static void pmem_submit_bio(struct bio *bio)
+ {
+ 	int ret = 0;
+@@ -207,6 +222,7 @@ static void pmem_submit_bio(struct bio *bio)
+ 	struct bvec_iter iter;
+ 	struct pmem_device *pmem = bio->bi_bdev->bd_disk->private_data;
+ 	struct nd_region *nd_region = to_region(pmem);
++	unsigned int op = bio_op(bio);
+ 
+ 	if (bio->bi_opf & REQ_PREFLUSH)
+ 		ret = nvdimm_flush(nd_region, bio);
+@@ -214,18 +230,24 @@ static void pmem_submit_bio(struct bio *bio)
+ 	do_acct = blk_queue_io_stat(bio->bi_bdev->bd_disk->queue);
+ 	if (do_acct)
+ 		start = bio_start_io_acct(bio);
+-	bio_for_each_segment(bvec, bio, iter) {
+-		if (op_is_write(bio_op(bio)))
+-			rc = pmem_do_write(pmem, bvec.bv_page, bvec.bv_offset,
+-				iter.bi_sector, bvec.bv_len);
+-		else
+-			rc = pmem_do_read(pmem, bvec.bv_page, bvec.bv_offset,
+-				iter.bi_sector, bvec.bv_len);
+-		if (rc) {
+-			bio->bi_status = rc;
+-			break;
++
++	if (op == REQ_OP_WRITE_ZEROES) {
++		rc = pmem_do_zero(pmem, bio->bi_iter.bi_sector, bio->bi_iter.bi_size);
++	} else {
++		bio_for_each_segment(bvec, bio, iter) {
++			if (op_is_write(bio_op(bio)))
++				rc = pmem_do_write(pmem, bvec.bv_page, bvec.bv_offset,
++					iter.bi_sector, bvec.bv_len);
++			else
++				rc = pmem_do_read(pmem, bvec.bv_page, bvec.bv_offset,
++					iter.bi_sector, bvec.bv_len);
++			if (rc) {
++				bio->bi_status = rc;
++				break;
++			}
+ 		}
+ 	}
++
+ 	if (do_acct)
+ 		bio_end_io_acct(bio, start);
+ 
+@@ -523,6 +545,7 @@ static int pmem_attach_disk(struct device *dev,
+ 	if (!disk)
+ 		return -ENOMEM;
+ 	q = disk->queue;
++	blk_queue_max_write_zeroes_sectors(q, 4096);
+ 
+ 	pmem->disk = disk;
+ 	pmem->pgmap.owner = pmem;
+-- 
+2.49.0
+

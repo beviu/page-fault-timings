@@ -1,0 +1,28 @@
+From 897569ba52da5d21af3dacee7fcd600a2769fdbf Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Sat, 23 Apr 2022 11:09:11 -0500
+Subject: [PATCH 041/179] We don't need to mark the inode dirty in FOM because
+ it won't be persisted anyway
+
+---
+ fs/ext4/inode.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index bfbfec99b134..da8f309693ab 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -6078,6 +6078,10 @@ int __ext4_mark_inode_dirty(handle_t *handle, struct inode *inode,
+ 	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
+ 	int err;
+ 
++	if (ext4_should_enable_dax(inode)) {
++		return 0;
++	}
++
+ 	might_sleep();
+ 	trace_ext4_mark_inode_dirty(inode, _RET_IP_);
+ 	err = ext4_reserve_inode_write(handle, inode, &iloc);
+-- 
+2.49.0
+

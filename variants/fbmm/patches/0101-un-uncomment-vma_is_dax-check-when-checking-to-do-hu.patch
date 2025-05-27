@@ -1,0 +1,32 @@
+From 6532f37d13f02312915c89e8e0deb6856a211076 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Wed, 26 Jul 2023 12:20:32 -0500
+Subject: [PATCH 101/179] un-uncomment vma_is_dax check when checking to do
+ huge fault
+
+This was preventing MMFSs that use DAX from using huge pages.
+I don't remember why it was originally commented out.
+I am not sure if a similar thing will prevent MMFSs that don't use
+dax from using huge pages
+---
+ mm/huge_memory.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index be944e9e1cf1..0c1ab7f7c102 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -92,8 +92,8 @@ bool hugepage_vma_check(struct vm_area_struct *vma, unsigned long vm_flags,
+ 		return false;
+ 
+ 	/* khugepaged doesn't collapse DAX vma, but page fault is fine. */
+-	//if (vma_is_dax(vma))
+-	//	return in_pf;
++	if (vma_is_dax(vma))
++		return in_pf;
+ 
+ 	/*
+ 	 * Special VMA and hugetlb VMA.
+-- 
+2.49.0
+

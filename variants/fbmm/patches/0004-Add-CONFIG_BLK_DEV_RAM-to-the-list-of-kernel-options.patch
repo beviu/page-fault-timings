@@ -1,0 +1,26 @@
+From 2081e44440264b9d458aca91f3e33fa0acf7e4e8 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 29 Sep 2021 15:36:08 -0500
+Subject: [PATCH 004/179] Add CONFIG_BLK_DEV_RAM to the list of kernel options
+
+---
+ kernel_options | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/kernel_options b/kernel_options
+index abad5d6d4679..69d2995fca42 100644
+--- a/kernel_options
++++ b/kernel_options
+@@ -20,6 +20,9 @@ CONFIG_DAX=y
+ To enable THP:
+ CONFIG_TRANSPARENT_HUGEPAGE=y
+ 
++To have ramdisks in /dev:
++CONFIG_BLK_DEV_RAM=y
++
+ For QEMU:
+ CONFIG_BLK_DEV_INITRD=y
+ CONFIG_PCI=y
+-- 
+2.49.0
+

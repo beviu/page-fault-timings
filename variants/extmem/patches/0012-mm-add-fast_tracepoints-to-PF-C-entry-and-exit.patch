@@ -1,0 +1,60 @@
+From 03b45f418b4af1c08d68d5f9e926bf5fd7ca7fa1 Mon Sep 17 00:00:00 2001
+From: beviu <contact@beviu.com>
+Date: Wed, 14 May 2025 19:05:17 +0200
+Subject: [PATCH 12/14] mm: add fast_tracepoints to PF C entry and exit
+
+---
+ arch/x86/mm/fault.c  | 9 +++++++++
+ include/trace/fast.h | 4 +++-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 8e5b7ed4486a..42d0ca7ead41 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -37,6 +37,8 @@
+ #define CREATE_TRACE_POINTS
+ #include <asm/trace/exceptions.h>
+ 
++#include <trace/fast.h>
++
+ /*
+  * Returns 0 if mmiotrace is disabled, or if the fault is not
+  * handled by mmiotrace:
+@@ -1511,6 +1513,10 @@ DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)
+ {
+ 	unsigned long address = read_cr2();
+ 	irqentry_state_t state;
++	bool trace = IS_ENABLED(CONFIG_TRACE_PF) && likely((regs->bx & 0xffffffff) == 0xb141a52a);
++
++	if (trace)
++		fast_tracepoint(c_entry);
+ 
+ 	prefetchw(&current->mm->mmap_lock);
+ 
+@@ -1555,4 +1561,7 @@ DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)
+ 	instrumentation_end();
+ 
+ 	irqentry_exit(regs, state);
++
++	if (trace)
++		fast_tracepoint(c_exit);
+ }
+diff --git a/include/trace/fast.h b/include/trace/fast.h
+index 20866a45bbf0..77730c143325 100644
+--- a/include/trace/fast.h
++++ b/include/trace/fast.h
+@@ -9,7 +9,9 @@
+ 
+ #include <asm/msr.h>
+ 
+-#define ENUMERATE_FAST_TRACEPOINTS(x)
++#define ENUMERATE_FAST_TRACEPOINTS(x) \
++	x(c_entry)		      \
++	x(c_exit)
+ 
+ #define DECLARE_FAST_TRACEPOINT(name) extern u64 fast_tracepoint_##name;
+ ENUMERATE_FAST_TRACEPOINTS(DECLARE_FAST_TRACEPOINT)
+-- 
+2.49.0
+

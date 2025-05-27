@@ -1,0 +1,46 @@
+From f730a7ffeea4c46e457b277b2e1be9310e6b7307 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Sat, 28 Oct 2023 15:47:23 -0500
+Subject: [PATCH 115/179] Increase the max order of the buddy list
+
+This is a bandaid for ContigMMFS. We probably should just prereserve
+a bunch of memory and implement our own buddy allocator
+---
+ arch/x86/include/asm/sparsemem.h | 4 ++--
+ include/linux/mmzone.h           | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/include/asm/sparsemem.h b/arch/x86/include/asm/sparsemem.h
+index 64df897c0ee3..e3f0c68eaf3e 100644
+--- a/arch/x86/include/asm/sparsemem.h
++++ b/arch/x86/include/asm/sparsemem.h
+@@ -21,11 +21,11 @@
+ #  define SECTION_SIZE_BITS	29
+ #  define MAX_PHYSMEM_BITS	36
+ # else
+-#  define SECTION_SIZE_BITS	26
++#  define SECTION_SIZE_BITS	30
+ #  define MAX_PHYSMEM_BITS	32
+ # endif
+ #else /* CONFIG_X86_32 */
+-# define SECTION_SIZE_BITS	27 /* matt - 128 is convenient right now */
++# define SECTION_SIZE_BITS	30 /* matt - 128 is convenient right now */
+ # define MAX_PHYSMEM_BITS	(pgtable_l5_enabled() ? 52 : 46)
+ #endif
+ 
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index cd28a100d9e4..66d8c008ba5f 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -25,7 +25,7 @@
+ 
+ /* Free memory management - zoned buddy allocator.  */
+ #ifndef CONFIG_ARCH_FORCE_MAX_ORDER
+-#define MAX_ORDER 11
++#define MAX_ORDER 18
+ #else
+ #define MAX_ORDER CONFIG_ARCH_FORCE_MAX_ORDER
+ #endif
+-- 
+2.49.0
+

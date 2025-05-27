@@ -1,0 +1,47 @@
+From 1a6880fdeaad202e90b861a5d63b2061d01d890b Mon Sep 17 00:00:00 2001
+From: SepehrDV2 <sepehr.jalalian.edu@gmail.com>
+Date: Sat, 6 Jan 2024 17:39:38 -0800
+Subject: [PATCH 07/14] less locking when copy
+
+---
+ mm/userfaultfd.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/mm/userfaultfd.c b/mm/userfaultfd.c
+index c20befdd68bd..9487dc9fe817 100644
+--- a/mm/userfaultfd.c
++++ b/mm/userfaultfd.c
+@@ -167,13 +167,16 @@ static int mcopy_atomic_pte(struct mm_struct *dst_mm,
+ 			goto out;
+ 
+ 		page_kaddr = kmap_atomic(page);
+-		ret = copy_from_user(page_kaddr,
+-				     (const void __user *) src_addr,
+-				     PAGE_SIZE);
++		//ret = copy_from_user(page_kaddr,
++		//		     (const void __user *) src_addr,
++		//			 PAGE_SIZE);
++		// trick
++		ret = -ENOENT;
+ 		kunmap_atomic(page_kaddr);
+ 
+ 		/* fallback to copy_from_user outside mmap_lock */
+-		if (unlikely(ret)) {
++		//if (unlikely(ret)) {
++		if (ret) {
+ 			ret = -ENOENT;
+ 			*pagep = page;
+ 			/* don't free the page */
+@@ -656,7 +659,8 @@ static __always_inline ssize_t __mcopy_atomic(struct mm_struct *dst_mm,
+ 				       src_addr, &page, mcopy_mode, wp_copy);
+ 		cond_resched();
+ 
+-		if (unlikely(err == -ENOENT)) {
++		//if (unlikely(err == -ENOENT)) {
++		if (err == -ENOENT) {
+ 			void *page_kaddr;
+ 
+ 			mmap_read_unlock(dst_mm);
+-- 
+2.49.0
+

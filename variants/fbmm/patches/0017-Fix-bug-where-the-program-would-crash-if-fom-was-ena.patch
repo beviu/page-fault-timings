@@ -1,0 +1,240 @@
+From 96c131750c5a1492a5c549e10c021630f7c7dd80 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 20 Oct 2021 15:45:27 -0500
+Subject: [PATCH 017/179] Fix bug where the program would crash if fom was
+ enabled at beginning
+
+This bug was because we would register a file to the FOM system at the beginning of
+mmap. However, at the end of mmap is a call to "mmap_region" which will unmap
+regions that overlap with the new mapping.
+The problem occured in the following steps
+1) An anonymous mmap call that overlaps with an existing mmap is made
+2) A FOM file is registered with the FOM system in the address range
+3) mmap_region is called, unmapping the previously existing overlapped range
+4) The FOM system would detect the munmap and delete the file associated with
+that range, which was the file we just created
+5) The program would try to access the new mmap, but the backing file was deleted
+
+This was fixed by only creating the FOM file at the beginning of do_mmap when
+it is needed, and registering the file only after mmap_region is called.
+---
+ include/linux/file_only_mem.h | 12 +++++---
+ mm/file_only_mem.c            | 55 ++++++++++++++---------------------
+ mm/mmap.c                     | 18 +++++++-----
+ 3 files changed, 41 insertions(+), 44 deletions(-)
+
+diff --git a/include/linux/file_only_mem.h b/include/linux/file_only_mem.h
+index 80fcac37752e..a9ca622604ea 100644
+--- a/include/linux/file_only_mem.h
++++ b/include/linux/file_only_mem.h
+@@ -8,8 +8,9 @@
+ 
+ bool use_file_only_mem(pid_t pid);
+ 
+-struct file *fom_create_new_file(unsigned long start, unsigned long len,
+-	unsigned long prot, pid_t pid);
++struct file *fom_create_new_file(unsigned long len,	unsigned long prot);
++void fom_register_file(pid_t pid, struct file *f, unsigned long start,
++		unsigned long len);
+ int fom_munmap(pid_t pid, unsigned long start, unsigned long len);
+ void fom_check_exiting_proc(pid_t pid);
+ 
+@@ -19,11 +20,14 @@ inline bool use_file_only_mem(pid_t pid) {
+ 	return false;
+ }
+ 
+-inline struct file *fom_create_new_file(unsigned long start, unsigned long len,
+-	unsigned long prot, pid_t pid) {
++inline struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
+ 	return NULL;
+ }
+ 
++inline void fom_register_file(pid_t pid, struct file *f, unsigned long start,
++		unsigned long len)
++{}
++
+ inline int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 	return 0;
+ }
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index 663aff984533..2222f8633a4f 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -40,7 +40,6 @@ struct fom_proc {
+ 
+ static enum file_only_mem_state fom_state = FOM_OFF;
+ static pid_t cur_proc = 0;
+-static int fom_count = 0;
+ static char file_dir[PATH_MAX];
+ static struct rb_root fom_procs = RB_ROOT;
+ static DECLARE_RWSEM(fom_procs_sem);
+@@ -194,7 +193,6 @@ static void delete_fom_file(struct file *f) {
+ }
+ 
+ static void drop_fom_file(struct fom_mapping *map) {
+-//	pr_err("count: %d %llx %llx\n", map->file->count, map->start, map->end);
+ 	map->file->count--;
+ 	if (map->file->count <= 0) {
+ 		delete_fom_file(map->file->f);
+@@ -203,7 +201,23 @@ static void drop_fom_file(struct fom_mapping *map) {
+ 	}
+ }
+ 
+-static struct file *open_new_file(unsigned long len, unsigned long prot) {
++///////////////////////////////////////////////////////////////////////////////
++// External API functions
++
++bool use_file_only_mem(pid_t pid) {
++	if (fom_state == FOM_OFF) {
++		return false;
++	} if (fom_state == FOM_SINGLE_PROC) {
++		return pid == cur_proc;
++	} else if (fom_state == FOM_ALL) {
++		return true;
++	}
++
++	// Should never reach here
++	return false;
++}
++
++struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
+ 	struct file *f;
+ 	int open_flags = O_EXCL | O_TMPFILE;
+ 	umode_t open_mode = 0;
+@@ -238,35 +252,14 @@ static struct file *open_new_file(unsigned long len, unsigned long prot) {
+ 	return f;
+ }
+ 
+-///////////////////////////////////////////////////////////////////////////////
+-// External API functions
+-
+-bool use_file_only_mem(pid_t pid) {
+-	if (fom_state == FOM_OFF) {
+-		return false;
+-	} if (fom_state == FOM_SINGLE_PROC) {
+-		return pid == cur_proc;
+-	} else if (fom_state == FOM_ALL) {
+-		return true;
+-	}
+-
+-	// Should never reach here
+-	return false;
+-}
+-
+-struct file *fom_create_new_file(unsigned long start, unsigned long len,
+-		unsigned long prot, pid_t pid)
++void fom_register_file(pid_t pid, struct file *f,
++		unsigned long start, unsigned long len)
+ {
+ 	struct fom_proc *proc;
+ 	struct fom_mapping *mapping = NULL;
+ 	struct fom_file *file = NULL;
+ 	bool new_proc = false;
+ 
+-	// Workaround for this causing a crash in the dynamic linker
+-	fom_count++;
+-	if (fom_count <= 2)
+-		return NULL;
+-
+ 	down_read(&fom_procs_sem);
+ 	proc = get_fom_proc(pid);
+ 	up_read(&fom_procs_sem);
+@@ -277,7 +270,7 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
+ 		proc = vmalloc(sizeof(struct fom_proc));
+ 		if (!proc) {
+ 			pr_err("fom_create_new_file: not enough memory for proc\n");
+-			return NULL;
++			return;
+ 		}
+ 
+ 		proc->pid = pid;
+@@ -288,7 +281,7 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
+ 	if (!file)
+ 		goto err;
+ 
+-	file->f = open_new_file(len, prot);
++	file->f = f;
+ 	if (!file->f)
+ 		goto err;
+ 	file->count = 1;
+@@ -313,14 +306,12 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
+ 		insert_new_proc(proc);
+ 	up_write(&fom_procs_sem);
+ 
+-	return file->f;
+-
++	return;
+ err:
+ 	if (new_proc)
+ 		vfree(proc);
+ 	if (file)
+ 		vfree(file);
+-	return NULL;
+ }
+ 
+ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+@@ -456,8 +447,6 @@ void fom_check_exiting_proc(pid_t pid) {
+ 	if (!proc)
+ 		return;
+ 
+-	fom_count = 0;
+-
+ 	down_write(&fom_procs_sem);
+ 
+ 	// First, free the mappings tree
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 5f16771984fc..6347f0ca5c11 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1245,6 +1245,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 	struct mm_struct *mm = current->mm;
+ 	vm_flags_t vm_flags;
+ 	int pkey = 0;
++	bool created_fom_file = false;
+ 
+ 	validate_mm(mm);
+ 	*populate = 0;
+@@ -1315,13 +1316,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 		return -EAGAIN;
+ 
+ 	// See if we want to use file only memory
+-//	if (use_file_only_mem(current->tgid)) {
+-//		pr_err("%lx %lx %lx %p\n", addr, addr + len, flags & MAP_ANONYMOUS, file);
+-//	}
+ 	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
+-		file = fom_create_new_file(addr, len, prot, current->tgid);
++		file = fom_create_new_file(len, prot);
+ 
+ 		if (file) {
++			created_fom_file = true;
+ 			flags = flags & ~MAP_ANONYMOUS;
+ 
+ 			// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
+@@ -1433,6 +1432,14 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 	    ((vm_flags & VM_LOCKED) ||
+ 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
+ 		*populate = len;
++
++	// Because mmap_region will unmap regions that overlap with the new region,
++	// we must wait to register the new fom file until after it is finished.
++	// This is to prevent a fom file from being registered and then an overlapping
++	// region is unmapped, making the fom system think it needs to delete the new file
++	if (created_fom_file) {
++		fom_register_file(current->tgid, file, addr, len);
++	}
+ 	return addr;
+ }
+ 
+@@ -2340,9 +2347,6 @@ static inline int munmap_sidetree(struct vm_area_struct *vma,
+ 
+ 	if (vma->vm_flags & VM_LOCKED)
+ 		vma->vm_mm->locked_vm -= vma_pages(vma);
+-//	if (use_file_only_mem(current->tgid)) {
+-//		pr_err("a %lx %lx\n", start, end);
+-//	}
+ 
+ 	return 0;
+ }
+-- 
+2.49.0
+

@@ -1,0 +1,38 @@
+From 7fdfd8c63824c10bb627a3c89eea8fe459e8b15c Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Wed, 13 Dec 2023 10:17:51 -0600
+Subject: [PATCH 133/179] Make sure to copy null terminator in
+ fbmm_copy_mnt_dir
+
+Also just return if src pid is then same as the dst pid
+---
+ mm/file_based_mm.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 92bb8ac5b09e..db4a89684ef7 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -500,6 +500,10 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
+ 	char *mt_entry;
+ 	size_t len;
+ 
++	// noop
++	if (src == dst)
++		return 0;
++
+ 	// Does the src actually have a default mnt dir
+ 	mt_entry = mtree_load(&fbmm_proc_mnt_dirs, src);
+ 	if (!mt_entry)
+@@ -507,7 +511,7 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
+ 
+ 	len = strnlen(mt_entry, PATH_MAX);
+ 	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
+-	strncpy(buffer, mt_entry, len);
++	strncpy(buffer, mt_entry, len + 1);
+ 
+ 	return mtree_store(&fbmm_proc_mnt_dirs, dst, buffer, GFP_KERNEL);
+ }
+-- 
+2.49.0
+

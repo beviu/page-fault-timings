@@ -1,0 +1,26 @@
+From b7debf38abb3f47bc056e649ffff6bda9f5352f7 Mon Sep 17 00:00:00 2001
+From: bijan <bijan@node0.bijan-234419.superpages-pg0.wisc.cloudlab.us>
+Date: Thu, 5 Dec 2024 15:11:05 +0000
+Subject: [PATCH 174/179] Export native_write_cr4 for Quartz
+
+---
+ arch/x86/kernel/cpu/common.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 6a25e93f2a87..0f38b1dcef32 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -456,9 +456,7 @@ void __no_profile native_write_cr4(unsigned long val)
+ 			  bits_changed);
+ 	}
+ }
+-#if IS_MODULE(CONFIG_LKDTM)
+ EXPORT_SYMBOL_GPL(native_write_cr4);
+-#endif
+ 
+ void cr4_update_irqsoff(unsigned long set, unsigned long clear)
+ {
+-- 
+2.49.0
+

@@ -1,0 +1,199 @@
+From 87d811d64f1ef7dbb0c2381883998336b8ca8535 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Fri, 1 Oct 2021 14:09:37 -0500
+Subject: [PATCH 006/179] Turn anonymous memory into file backed memory
+
+We back the previously anonymous memory with a temorary file created in the kernel.
+To make sure we don't use anonymous CoW pages, change MAP_PRIVATE mapping to MAP_SHARED.
+
+This code currently leaves the files in place after the program exits, so we will need to delete them
+---
+ include/linux/file_only_mem.h |  7 ++++
+ mm/file_only_mem.c            | 71 ++++++++++++++++++++++++++++++++---
+ mm/mmap.c                     | 14 +++++++
+ 3 files changed, 86 insertions(+), 6 deletions(-)
+
+diff --git a/include/linux/file_only_mem.h b/include/linux/file_only_mem.h
+index cbd5c4c5cb79..d302282735d9 100644
+--- a/include/linux/file_only_mem.h
++++ b/include/linux/file_only_mem.h
+@@ -2,17 +2,24 @@
+ #define _FILE_ONLY_MEM_H_
+ 
+ #include <linux/types.h>
++#include <linux/fs.h>
+ 
+ #ifdef CONFIG_FILE_ONLY_MEM
+ 
+ bool use_file_only_mem(pid_t pid);
+ 
++struct file *create_new_fom_file(unsigned long len, unsigned long prot);
++
+ #else //CONFIG_FILE_ONLY_MEM
+ 
+ inline bool use_file_only_mem(pid_t pid) {
+ 	return false;
+ }
+ 
++inline struct file *create_new_fom_file(unsigned long len, unsigned long prot) {
++	return NULL;
++}
++
+ #endif //CONFIG_FILE_ONLY_MEM
+ 
+ #endif //__FILE_ONLY_MEM_H
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index d170cfef0b16..e4180e39061e 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -3,6 +3,9 @@
+ #include <linux/sysfs.h>
+ #include <linux/kobject.h>
+ #include <linux/namei.h>
++#include <linux/fs.h>
++#include <linux/mman.h>
++#include <linux/security.h>
+ 
+ enum file_only_mem_state {
+ 	FOM_OFF = 0,
+@@ -12,7 +15,7 @@ enum file_only_mem_state {
+ 
+ static enum file_only_mem_state fom_state = FOM_OFF;
+ static pid_t fom_proc = 0;
+-char file_dir[256];
++static char file_dir[PATH_MAX];
+ 
+ bool use_file_only_mem(pid_t pid) {
+ 	if (fom_state == FOM_OFF) {
+@@ -27,6 +30,62 @@ bool use_file_only_mem(pid_t pid) {
+ 	return false;
+ }
+ 
++// Most of this is taken from do_sys_truncate is fs/open.c
++static int truncate_fom_file(struct file *f, unsigned long len) {
++	struct inode *inode;
++	struct dentry *dentry;
++	int error;
++
++	dentry = f->f_path.dentry;
++	inode = dentry->d_inode;
++
++	sb_start_write(inode->i_sb);
++	error = locks_verify_truncate(inode, f, len);
++	if (!error)
++		error = security_path_truncate(&f->f_path);
++	if (!error)
++		error = do_truncate(file_mnt_user_ns(f), dentry, len,
++				    ATTR_MTIME | ATTR_CTIME, f);
++	sb_end_write(inode->i_sb);
++
++	return error;
++}
++
++struct file *create_new_fom_file(unsigned long len, unsigned long prot) {
++	struct file *f;
++	int open_flags = O_EXCL | O_TMPFILE;
++	umode_t open_mode = 0;
++	int ret = 0;
++
++	// Determine what flags to use for the call to open
++	if (prot & PROT_EXEC)
++		open_mode |= S_IXUSR;
++
++	if ((prot & (PROT_READ | PROT_WRITE)) == (PROT_READ | PROT_WRITE)) {
++		open_flags |= O_RDWR;
++		open_mode |= S_IRUSR | S_IWUSR;
++	} else if (prot & PROT_WRITE) {
++		open_flags |= O_WRONLY;
++		open_mode |= S_IWUSR;
++	} else if (prot & PROT_READ) {
++		// It doesn't make sense for anon memory to be read only,
++		return NULL;
++	}
++
++	f = filp_open(file_dir, open_flags, open_mode);
++	if (IS_ERR(f))
++		return NULL;
++
++	// Set the file to the correct size
++	ret = truncate_fom_file(f, len);
++	if (ret) {
++		filp_close(f, current->files);
++		return NULL;
++	}
++
++	return f;
++}
++
+ ///////////////////////////////////////////////////////////////////////////////
+ // sysfs files
+ static ssize_t fom_state_show(struct kobject *kobj,
+@@ -98,12 +157,12 @@ static ssize_t fom_dir_store(struct kobject *kobj,
+ 	struct path p;
+ 	int err;
+ 
+-	if (count > sizeof(file_dir)) {
+-		memset(file_dir, 0, sizeof(file_dir));
++	if (count > PATH_MAX) {
++		memset(file_dir, 0, PATH_MAX);
+ 		return -ENOMEM;
+ 	}
+ 
+-	strncpy(file_dir, buf, sizeof(file_dir));
++	strncpy(file_dir, buf, PATH_MAX);
+ 
+ 	// echo likes to put an extra \n at the end of the string
+ 	// if it's there, remove it
+@@ -114,7 +173,7 @@ static ssize_t fom_dir_store(struct kobject *kobj,
+ 	err = kern_path(file_dir, LOOKUP_DIRECTORY, &p);
+ 
+ 	if (err) {
+-		memset(file_dir, 0, sizeof(file_dir));
++		memset(file_dir, 0, PATH_MAX);
+ 		return err;
+ 	}
+ 
+@@ -141,7 +200,7 @@ static int __init file_only_memory_init(void)
+ 	struct kobject *fom_kobj;
+ 	int err;
+ 
+-	memset(file_dir, 0, sizeof(file_dir));
++	memset(file_dir, 0, PATH_MAX);
+ 
+ 	fom_kobj = kobject_create_and_add("fom", mm_kobj);
+ 	if (unlikely(!fom_kobj)) {
+diff --git a/mm/mmap.c b/mm/mmap.c
+index a302f6a709ab..82fc47b84c66 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -51,6 +51,7 @@
+ #include <asm/cacheflush.h>
+ #include <asm/tlb.h>
+ #include <asm/mmu_context.h>
++#include <linux/file_only_mem.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/mmap.h>
+@@ -1281,6 +1282,19 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 	if (mm->map_count > sysctl_max_map_count)
+ 		return -ENOMEM;
+ 
++	// See if we want to use file only memory
++	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
++		file = create_new_fom_file(len, prot);
++		flags = flags & ~MAP_ANONYMOUS;
++
++		// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
++		// the system doesn't save the writes to anonymous memory
++		if (flags & MAP_PRIVATE) {
++			flags = flags & ~MAP_PRIVATE;
++			flags = flags | MAP_SHARED;
++		}
++	}
++
+ 	/* Obtain the address to map to. we verify (or select) it and ensure
+ 	 * that it represents a valid section of the address space.
+ 	 */
+-- 
+2.49.0
+

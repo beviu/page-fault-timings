@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-set -eu
+set -eux
 
-worktree_name="$1"
+variant="$1"
 remote_name="$2"
 remote_url="$3"
 ref="$4"
-root="$(pwd)"
+root="$(dirname "$(readlink -f "$0")")"
 
 create_kernel_repo_if_not_exists() {
   [ -d linux ] || \
@@ -20,33 +20,33 @@ git_remote_add_if_missing() {
     git remote add "$name" "$url"
 }
 
-git_worktree_add_detach_or_checkout() {
-  local name="$1"
-  local ref="$2"
-
-  if [ -d "$name" ]; then
-    pushd "$name"
-    git checkout "$ref"
-    popd
-  else
-    git worktree add "$name" --detach "$ref"
-  fi
-}
-
 create_kernel_repo_if_not_exists
 
 cd linux
 
-git_remote_add_if_missing "$remote_name" "$remote_url"
-git fetch "$remote_name"
-git_worktree_add_detach_or_checkout "$worktree_name" "$ref"
+if [ -d "$variant" ]; then
+  cd "$variant"
+else
+  git_remote_add_if_missing "$remote_name" "$remote_url"
+  git fetch "$remote_name" "$ref"
 
-cd "$worktree_name"
+  git worktree add "$variant" --detach "$ref"
 
-git am "$root/patches/$worktree_name"/*.patch
+  cd "$variant"
 
-cp "$root/patches/$worktree_name/config" .config
-make olddefconfig
+  GIT_COMMITTER_NAME=build-kernel \
+    GIT_COMMITTER_EMAIL='build-kernel@internship.invalid' \
+    git am "$root/variants/$variant"/patches/*.patch
+
+  yes '' | make localmodconfig
+
+  scripts/config --set-str CONFIG_LOCALVERSION "-$variant"
+  scripts/config --enable CONFIG_TRACE_PF
+  scripts/config --enable CONFIG_FAST_TRACEPOINTS
+
+  make olddefconfig
+fi
 
 make
 make modules
+make headers_install

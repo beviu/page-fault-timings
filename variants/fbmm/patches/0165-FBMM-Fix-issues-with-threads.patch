@@ -1,0 +1,45 @@
+From 29a3b89b558d0a1e010f20f7d0532eb386b70161 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Thu, 10 Oct 2024 10:13:26 -0500
+Subject: [PATCH 165/179] FBMM: Fix issues with threads
+
+Issue 1: Used an in instead of else if, meaning threads were creating
+new fbmm_proc when they should be sharing with their parent
+
+Issue 2: Every exiting thread would call fbmm_exit. Now, only have the
+main thread do the cleanup
+---
+ kernel/fork.c      | 2 +-
+ mm/file_based_mm.c | 3 +++
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index c3cd340f815d..f48636c1376e 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -2165,7 +2165,7 @@ static __latent_entropy struct task_struct *copy_process(
+ 	if (clone_flags & CLONE_THREAD) {
+ 		// If the new task is just a thread, not a new proc, just copy fbmm info
+ 		p->fbmm_proc = current->fbmm_proc;
+-	} if (use_file_based_mm(current)) {
++	} else if (use_file_based_mm(current)) {
+ 		// Copy the default fbmm mount dir on fork
+ 		if (fbmm_copy(current, p)) {
+ 			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 5a0e080e2bce..781dbfb89bbf 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -399,6 +399,9 @@ void fbmm_exit(struct task_struct *tsk) {
+ 	struct fbmm_cow_list_entry *cow_entry, *tmp;
+ 	unsigned long index = 0;
+ 
++	if (tsk->tgid != tsk->pid)
++		return;
++
+ 	proc = tsk->fbmm_proc;
+ 	if (!proc)
+ 		return;
+-- 
+2.49.0
+

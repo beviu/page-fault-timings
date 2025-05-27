@@ -1,0 +1,953 @@
+From 9b5ad3939eaaf732e4a3cc4fe91dd7a9470af866 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Wed, 11 Oct 2023 09:44:10 -0500
+Subject: [PATCH 109/179] Part badger trap
+
+Currently not tested
+---
+ arch/x86/entry/syscalls/syscall_64.tbl |   1 +
+ arch/x86/mm/fault.c                    |  17 +-
+ fs/exec.c                              |  16 ++
+ include/linux/badger_trap.h            |  17 ++
+ include/linux/mm_types.h               |   9 ++
+ include/linux/sched.h                  |   4 +
+ include/linux/syscalls.h               |   1 +
+ kernel/exit.c                          |  35 +++++
+ mm/Makefile                            |   2 +-
+ mm/badger_trap.c                       | 208 +++++++++++++++++++++++++
+ mm/huge_memory.c                       |  26 ++++
+ mm/hugetlb.c                           |  91 ++++++++++-
+ mm/memory.c                            | 200 ++++++++++++++++++++++++
+ 13 files changed, 622 insertions(+), 5 deletions(-)
+ create mode 100644 include/linux/badger_trap.h
+ create mode 100644 mm/badger_trap.c
+
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index c84d12608cd2..6a763dea49d8 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -372,6 +372,7 @@
+ 448	common	process_mrelease	sys_process_mrelease
+ 449	common	futex_waitv		sys_futex_waitv
+ 450	common	set_mempolicy_home_node	sys_set_mempolicy_home_node
++451	64	init_badger_trap	sys_init_badger_trap
+ 
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 7b0d4ab894c8..00624908b66a 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -1147,7 +1147,12 @@ access_error(unsigned long error_code, struct vm_area_struct *vma)
+ 
+ 	/* read, present: */
+ 	if (unlikely(error_code & X86_PF_PROT))
+-		return 1;
++	{
++		if ((error_code & X86_PF_RSVD) && current->mm->badger_trap_en==1)
++			return 0;
++		else
++			return 1;
++	}
+ 
+ 	/* read, not present: */
+ 	if (unlikely(!vma_is_accessible(vma)))
+@@ -1284,7 +1289,7 @@ void do_user_addr_fault(struct pt_regs *regs,
+ 	 * Reserved bits are never expected to be set on
+ 	 * entries in the user portion of the page tables.
+ 	 */
+-	if (unlikely(error_code & X86_PF_RSVD))
++	if (unlikely(error_code & X86_PF_RSVD) && current->mm->badger_trap_en == 0)
+ 		pgtable_bad(regs, error_code, address);
+ 
+ 	/*
+@@ -1412,6 +1417,14 @@ void do_user_addr_fault(struct pt_regs *regs,
+ 		return;
+ 	}
+ 
++	if(error_code & X86_PF_INSTR)
++	{
++		/*
++		 * Instruction Page Fault
++		 */
++		flags = flags | FAULT_FLAG_INSTRUCTION;	
++	}
++
+ 	/*
+ 	 * If for any reason at all we couldn't handle the fault,
+ 	 * make sure we exit gracefully rather than endlessly redo
+diff --git a/fs/exec.c b/fs/exec.c
+index ab913243a367..dd4ba1c79ab3 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -77,6 +77,9 @@
+ 
+ static int bprm_creds_from_file(struct linux_binprm *bprm);
+ 
++extern int is_badger_trap_process(const char* proc_name);
++extern void badger_trap_init(struct mm_struct *mm);
++
+ int suid_dumpable = 0;
+ 
+ static LIST_HEAD(formats);
+@@ -1442,6 +1445,19 @@ void setup_new_exec(struct linux_binprm * bprm)
+ 
+ 	arch_setup_new_exec();
+ 
++	/* Check if we need to enable badger trap for this process */
++	if (is_badger_trap_process(current->comm))
++	{
++		current->mm->badger_trap_en = 1;
++		badger_trap_init(current->mm);
++	}
++	if (current && current->real_parent && current->real_parent != current
++		&& current->real_parent->mm && current->real_parent->mm->badger_trap_en)
++	{
++		current->mm->badger_trap_en = 1;
++		badger_trap_init(current->mm);
++	}
++
+ 	/* Set the new mm task size. We have to do that late because it may
+ 	 * depend on TIF_32BIT which is only updated in flush_thread() on
+ 	 * some architectures like powerpc
+diff --git a/include/linux/badger_trap.h b/include/linux/badger_trap.h
+new file mode 100644
+index 000000000000..fb6b2aa0198f
+--- /dev/null
++++ b/include/linux/badger_trap.h
+@@ -0,0 +1,17 @@
++#ifndef _LINUX_BADGER_TRAP_H
++#define _LINUX_BADGER_TRAP_H
++
++#define MAX_NAME_LEN	16
++#define PTE_RESERVED_MASK	(_AT(pteval_t, 1) << 51)
++
++char badger_trap_process[CONFIG_NR_CPUS][MAX_NAME_LEN];
++
++int is_badger_trap_process(const char* proc_name);
++inline pte_t pte_mkreserve(pte_t pte);
++inline pte_t pte_unreserve(pte_t pte);
++inline int is_pte_reserved(pte_t pte);
++inline pmd_t pmd_mkreserve(pmd_t pmd);
++inline pmd_t pmd_unreserve(pmd_t pmd);
++inline int is_pmd_reserved(pmd_t pmd);
++void badger_trap_init(struct mm_struct *mm);
++#endif /* _LINUX_BADGER_TRAP_H */
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index 0e41359d364a..75348feac477 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -803,11 +803,20 @@ struct mm_struct {
+ #endif /* CONFIG_LRU_GEN */
+ 	} __randomize_layout;
+ 
++	/*
++	 * Variables for Badger Trap
++	 */
++	unsigned int badger_trap_en;
++	unsigned long total_dtlb_misses;
++	unsigned long total_dtlb_4k_misses;
++	unsigned long total_dtlb_hugetlb_misses;
++
+ 	/*
+ 	 * The mm_cpumask needs to be at the end of mm_struct, because it
+ 	 * is dynamically sized based on nr_cpu_ids.
+ 	 */
+ 	unsigned long cpu_bitmap[];
++
+ };
+ 
+ #define MM_MT_FLAGS	(MT_FLAGS_ALLOC_RANGE | MT_FLAGS_LOCK_EXTERN | \
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 853d08f7562b..ba3e877099dd 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1528,6 +1528,10 @@ struct task_struct {
+ 	 */
+ 	randomized_struct_fields_end
+ 
++	unsigned long total_dtlb_misses;
++	unsigned long total_dtlb_4k_misses;
++	unsigned long total_dtlb_hugetlb_misses;
++
+ 	/* CPU-specific state of this task: */
+ 	struct thread_struct		thread;
+ 
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 33a0ee3bcb2e..c1b25cd9ae6c 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -1058,6 +1058,7 @@ asmlinkage long sys_memfd_secret(unsigned int flags);
+ asmlinkage long sys_set_mempolicy_home_node(unsigned long start, unsigned long len,
+ 					    unsigned long home_node,
+ 					    unsigned long flags);
++asmlinkage long sys_init_badger_trap(const char __user** process_name, unsigned long num_procs, int options);
+ 
+ /*
+  * Architecture-specific system calls
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 0448cccecfdb..3301473ca1fd 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -807,6 +807,7 @@ void __noreturn do_exit(long code)
+ {
+ 	struct task_struct *tsk = current;
+ 	int group_dead;
++	static DEFINE_MUTEX(result_mutex);
+ 
+ 	WARN_ON(irqs_disabled());
+ 
+@@ -814,6 +815,40 @@ void __noreturn do_exit(long code)
+ 
+ 	WARN_ON(tsk->plug);
+ 
++	/*
++	 * Statistics for Badger Trap
++	 */
++	if(current->mm && current->mm->badger_trap_en == 1)
++	{
++		mutex_lock(&result_mutex);
++		current->mm->total_dtlb_misses+= current->total_dtlb_misses;
++		current->mm->total_dtlb_4k_misses+= current->total_dtlb_4k_misses;
++		current->mm->total_dtlb_hugetlb_misses+= current->total_dtlb_hugetlb_misses;
++		mutex_unlock(&result_mutex);
++	}
++
++	if(current->mm && current->mm->badger_trap_en == 1 && current->tgid == current->pid)
++	{
++		if(current->real_parent->mm->badger_trap_en == 1)
++		{
++			mutex_lock(&result_mutex);
++			current->real_parent->mm->total_dtlb_misses+=current->mm->total_dtlb_misses;
++			current->real_parent->mm->total_dtlb_4k_misses+=current->mm->total_dtlb_4k_misses;
++			current->real_parent->mm->total_dtlb_hugetlb_misses+=current->mm->total_dtlb_hugetlb_misses;
++			mutex_unlock(&result_mutex);
++		}
++		else
++		{
++			printk("===================================\n");
++			printk("Statistics for Process %s\n",current->comm);
++			printk("DTLB miss detected %lu\n",current->mm->total_dtlb_misses);
++			printk("DTLB miss for 4KB page detected %lu\n",current->mm->total_dtlb_4k_misses);
++			printk("DTLB miss for hugepage detected %lu\n",current->mm->total_dtlb_hugetlb_misses);
++			printk("===================================\n");
++		}
++	}
++
++
+ 	// Bijan: When a process exits, check if we should delete its FOM files
+ 	// We only care if the main thread exits, so check against tsk->pid
+ 	// instead of tsk->tgid
+diff --git a/mm/Makefile b/mm/Makefile
+index 016178a9f62d..4c0378f34134 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -54,7 +54,7 @@ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
+ 			   mm_init.o percpu.o slab_common.o \
+ 			   compaction.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+-			   debug.o gup.o mmap_lock.o $(mmu-y)
++			   debug.o gup.o mmap_lock.o badger_trap.o $(mmu-y)
+ 
+ # Give 'page_alloc' its own module-parameter namespace
+ page-alloc-y := page_alloc.o
+diff --git a/mm/badger_trap.c b/mm/badger_trap.c
+new file mode 100644
+index 000000000000..44dba0209e4a
+--- /dev/null
++++ b/mm/badger_trap.c
+@@ -0,0 +1,208 @@
++#include <asm/pgalloc.h>
++#include <asm/uaccess.h>
++#include <asm/pgtable.h>
++#include <linux/badger_trap.h>
++#include <linux/syscalls.h>
++#include <linux/hugetlb.h>
++#include <linux/kernel.h>
++
++
++/*
++ * This syscall is generic way of setting up badger trap. 
++ * There are three options to start badger trap.
++ * (1) 	option > 0: provide all process names with number of processes.
++ * 	This will mark the process names for badger trap to start when any
++ * 	process with names specified will start.
++ *
++ * (2) 	option == 0: starts badger trap for the process calling the syscall itself.
++ *  	This requires binary to be updated for the workload to call badger trap. This
++ *  	option is useful when you want to skip the warmup phase of the program. You can 
++ *  	introduce the syscall in the program to invoke badger trap after that phase.
++ *
++ * (3) 	option < 0: provide all pid with number of processes. This will start badger
++ *  	trap for all pids provided immidiately.
++ *
++ *  Note: 	(1) will allow all the child processes to be marked for badger trap when
++ *  		forked from a badger trap process.
++
++ *		(2) and (3) will not mark the already spawned child processes for badger 
++ *		trap when you mark the parent process for badger trap on the fly. But (2) and (3) 
++ *		will mark all child spwaned from the parent process adter being marked for badger trap. 
++ */
++SYSCALL_DEFINE3(init_badger_trap, const char __user**, process_name, unsigned long, num_procs, int, option)
++{
++	unsigned int i;
++	char *temp;
++	unsigned long ret=0;
++	char proc[MAX_NAME_LEN];
++	struct task_struct * tsk;
++	unsigned long pid;
++
++	if(option > 0)
++	{
++		for(i=0; i<CONFIG_NR_CPUS; i++)
++		{
++			if(i<num_procs)
++				ret = strncpy_from_user(proc, process_name[i], MAX_NAME_LEN);
++			else
++				temp = strncpy(proc,"",MAX_NAME_LEN);
++			temp = strncpy(badger_trap_process[i], proc, MAX_NAME_LEN-1);
++		}
++	}
++
++	// All other inputs ignored
++	if(option == 0)
++	{
++		current->mm->badger_trap_en = 1;
++		badger_trap_init(current->mm);
++	}
++
++	if(option < 0)
++	{
++		for(i=0; i<CONFIG_NR_CPUS; i++)
++		{
++			if(i<num_procs)
++			{
++				ret = kstrtoul(process_name[i],10,&pid);
++				if(ret == 0)
++				{
++					tsk = find_task_by_vpid(pid);
++					tsk->mm->badger_trap_en = 1;
++					badger_trap_init(tsk->mm);
++				}
++			}
++		}
++	}
++
++	return 0;
++}
++
++/*
++ * This function checks whether a process name provided matches from the list
++ * of process names stored to be marked for badger trap.
++ */
++int is_badger_trap_process(const char* proc_name)
++{
++	unsigned int i;
++	for(i=0; i<CONFIG_NR_CPUS; i++)
++	{
++		if(!strncmp(proc_name,badger_trap_process[i],MAX_NAME_LEN))
++			return 1;
++	}
++	return 0;
++}
++
++/*
++ * Helper functions to manipulate all the TLB entries for reservation.
++ */
++inline pte_t pte_mkreserve(pte_t pte)
++{
++        return pte_set_flags(pte, PTE_RESERVED_MASK);
++}
++
++inline pte_t pte_unreserve(pte_t pte)
++{
++        return pte_clear_flags(pte, PTE_RESERVED_MASK);
++}
++
++inline int is_pte_reserved(pte_t pte)
++{
++        if(native_pte_val(pte) & PTE_RESERVED_MASK)
++                return 1;
++        else
++                return 0;
++}
++
++inline pmd_t pmd_mkreserve(pmd_t pmd)
++{
++        return pmd_set_flags(pmd, PTE_RESERVED_MASK);
++}
++
++inline pmd_t pmd_unreserve(pmd_t pmd)
++{
++        return pmd_clear_flags(pmd, PTE_RESERVED_MASK);
++}
++
++inline int is_pmd_reserved(pmd_t pmd)
++{
++        if(native_pmd_val(pmd) & PTE_RESERVED_MASK)
++                return 1;
++        else
++                return 0;
++}
++
++/*
++ * This function walks the page table of the process being marked for badger trap
++ * This helps in finding all the PTEs that are to be marked as reserved. This is 
++ * espicially useful to start badger trap on the fly using (2) and (3). If we do not
++ * call this function, when starting badger trap for any process, we may miss some TLB 
++ * misses from being tracked which may not be desierable.
++ *
++ * Note: This function takes care of transparent hugepages and hugepages in general.
++ */
++void badger_trap_init(struct mm_struct *mm)
++{
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++	pte_t *page_table;
++	spinlock_t *ptl;
++	unsigned long address;
++	unsigned long i,j,k,l;
++	unsigned long user = 0;
++	unsigned long mask = _PAGE_USER | _PAGE_PRESENT;
++	struct vm_area_struct *vma;
++	pgd_t *base = mm->pgd;
++	for(i=0; i<PTRS_PER_PGD; i++)
++	{
++		pgd = base + i;
++		if((pgd_flags(*pgd) & mask) != mask)
++			continue;
++		for(j=0; j<PTRS_PER_PUD; j++)
++		{
++			pud = (pud_t *)pgd_page_vaddr(*pgd) + j;
++			if((pud_flags(*pud) & mask) != mask)
++                        	continue;
++			address = (i<<PGDIR_SHIFT) + (j<<PUD_SHIFT);
++			if(vma && pud_huge(*pud) && is_vm_hugetlb_page(vma))
++			{
++				spin_lock(&mm->page_table_lock);
++				page_table = huge_pte_offset(mm, address, PMD_SIZE);
++				*page_table = pte_mkreserve(*page_table);
++				spin_unlock(&mm->page_table_lock);
++				continue;
++			}
++			for(k=0; k<PTRS_PER_PMD; k++)
++			{
++				pmd = (pmd_t *)pud_pgtable(*pud) + k;
++				if((pmd_flags(*pmd) & mask) != mask)
++					continue;
++				address = (i<<PGDIR_SHIFT) + (j<<PUD_SHIFT) + (k<<PMD_SHIFT);
++				vma = find_vma(mm, address);
++				if(vma && pmd_huge(*pmd) && (hugepage_flags_enabled()||hugepage_flags_always()||vma->vm_flags & VM_HUGEPAGE||is_vm_hugetlb_page(vma)))
++				{
++					spin_lock(&mm->page_table_lock);
++					*pmd = pmd_mkreserve(*pmd);
++					spin_unlock(&mm->page_table_lock);
++					continue;
++				}
++				for(l=0; l<PTRS_PER_PTE; l++)
++				{
++					pte = (pte_t *)pmd_page_vaddr(*pmd) + l;
++					if((pte_flags(*pte) & mask) != mask)
++						continue;
++					address = (i<<PGDIR_SHIFT) + (j<<PUD_SHIFT) + (k<<PMD_SHIFT) + (l<<PAGE_SHIFT);
++					vma = find_vma(mm, address);
++					if(vma)
++					{
++						page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
++						*pte = pte_mkreserve(*pte);
++						pte_unmap_unlock(page_table, ptl);
++					}
++					user++;
++				}
++			}
++		}
++	}
++}
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 0c1ab7f7c102..ade11736996d 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -46,6 +46,9 @@
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/thp.h>
+ 
++extern inline pmd_t pmd_mkreserve(pmd_t pmd);
++extern inline pte_t pte_mkreserve(pte_t pte);
++
+ /*
+  * By default, transparent hugepage support is disabled in order to avoid
+  * risking an increased memory footprint for applications that are not
+@@ -706,6 +709,11 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf,
+ 		page_add_new_anon_rmap(page, vma, haddr);
+ 		lru_cache_add_inactive_or_unevictable(page, vma);
+ 		pgtable_trans_huge_deposit(vma->vm_mm, vmf->pmd, pgtable);
++		/* Make the page table entry as reserved for TLB miss tracking */
++		if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
++		{
++			entry = pmd_mkreserve(entry);
++		}
+ 		set_pmd_at(vma->vm_mm, haddr, vmf->pmd, entry);
+ 		update_mmu_cache_pmd(vma, vmf->address, vmf->pmd);
+ 		add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PMD_NR);
+@@ -772,6 +780,14 @@ static void set_huge_zero_page(pgtable_t pgtable, struct mm_struct *mm,
+ 	entry = mk_pmd(zero_page, vma->vm_page_prot);
+ 	entry = pmd_mkhuge(entry);
+ 	pgtable_trans_huge_deposit(mm, pmd, pgtable);
++	/* Make the page table entry as reserved for TLB miss tracking 
++	 * No need to worry for zero page with instruction faults.
++	 * Instruction faults will never reach here.
++	 */
++	if(mm && (mm->badger_trap_en==1))
++	{
++		entry = pmd_mkreserve(entry);
++	}
+ 	set_pmd_at(mm, haddr, pmd, entry);
+ 	mm_inc_nr_ptes(mm);
+ }
+@@ -1378,6 +1394,11 @@ vm_fault_t do_huge_pmd_wp_page(struct vm_fault *vmf)
+ 		}
+ 		entry = pmd_mkyoung(orig_pmd);
+ 		entry = maybe_pmd_mkwrite(pmd_mkdirty(entry), vma);
++		/* Make the page table entry as reserved for TLB miss tracking */
++		if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
++		{
++			entry = pmd_mkreserve(entry);
++		}
+ 		if (pmdp_set_access_flags(vma, haddr, vmf->pmd, entry, 1))
+ 			update_mmu_cache_pmd(vma, vmf->address, vmf->pmd);
+ 		spin_unlock(vmf->ptl);
+@@ -2275,6 +2296,11 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
+ 		}
+ 		pte = pte_offset_map(&_pmd, addr);
+ 		BUG_ON(!pte_none(*pte));
++		/* Make the page table entry as reserved for TLB miss tracking */
++		if(mm && (mm->badger_trap_en==1))
++		{
++			entry = pte_mkreserve(entry);
++		}
+ 		set_pte_at(mm, addr, pte, entry);
+ 		pte_unmap(pte);
+ 	}
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index 4d338f70155c..e451eaf9bb54 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -47,6 +47,10 @@
+ #include "internal.h"
+ #include "hugetlb_vmemmap.h"
+ 
++extern inline pte_t pte_mkreserve(pte_t pte);
++extern inline pte_t pte_unreserve(pte_t pte);
++extern inline int is_pte_reserved(pte_t pte);
++
+ int hugetlb_max_hstate __read_mostly;
+ unsigned int default_hstate_idx;
+ struct hstate hstates[HUGE_MAX_HSTATE];
+@@ -5631,6 +5635,12 @@ static vm_fault_t hugetlb_wp(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		hugepage_add_new_anon_rmap(new_page, vma, haddr);
+ 		set_huge_pte_at(mm, haddr, ptep,
+ 				make_huge_pte(vma, new_page, !unshare));
++		/* Make the page table entry as reserved for TLB miss tracking */
++		if(mm && (mm->badger_trap_en==1) && (!(flags & FAULT_FLAG_INSTRUCTION)))
++		{
++			*ptep = pte_mkreserve(*ptep);
++		}
++
+ 		SetHPageMigratable(new_page);
+ 		/* Make the old page be freed below */
+ 		new_page = old_page;
+@@ -5932,6 +5942,12 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+ 		new_pte = huge_pte_wrprotect(huge_pte_mkuffd_wp(new_pte));
+ 	set_huge_pte_at(mm, haddr, ptep, new_pte);
+ 
++	/* Make the page table entry as reserved for TLB miss tracking */
++	if(mm && (mm->badger_trap_en==1) && (!(flags & FAULT_FLAG_INSTRUCTION)))
++	{
++		new_pte = pte_mkreserve(new_pte);
++	}
++
+ 	hugetlb_count_add(pages_per_huge_page(h), mm);
+ 	if ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) {
+ 		/* Optimization, do the COW without a second fault */
+@@ -5989,6 +6005,49 @@ u32 hugetlb_fault_mutex_hash(struct address_space *mapping, pgoff_t idx)
+ }
+ #endif
+ 
++static int hugetlb_fake_fault(struct mm_struct *mm, struct vm_area_struct *vma,
++                        unsigned long address, pte_t *page_table, unsigned int flags)
++{
++        unsigned long *touch_page_addr;
++        unsigned long touched;
++        unsigned long ret;
++        static unsigned int consecutive = 0;
++        static unsigned long prev_address = 0;
++
++        if(address == prev_address)
++                consecutive++;
++        else
++        {
++                consecutive = 0;
++                prev_address = address;
++        }
++
++        if(consecutive > 1)
++        {
++                *page_table = pte_unreserve(*page_table);
++                return 0;
++        }
++
++        if(flags & FAULT_FLAG_WRITE)
++                *page_table = huge_pte_mkdirty(*page_table);
++
++        *page_table = pte_mkyoung(*page_table);
++        *page_table = pte_unreserve(*page_table);
++
++        touch_page_addr = (void *)(address & PAGE_MASK);
++        ret = copy_from_user(&touched, (__force const void __user *)touch_page_addr, sizeof(unsigned long));
++
++	if(ret)
++		return VM_FAULT_SIGBUS;
++
++	/* Here where we do all our analysis */
++	current->total_dtlb_hugetlb_misses++;
++	current->total_dtlb_misses++;
++
++	*page_table = pte_mkreserve(*page_table);
++	return 0;
++}
++
+ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 			unsigned long address, unsigned int flags)
+ {
+@@ -6005,6 +6064,36 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	unsigned long haddr = address & huge_page_mask(h);
+ 
+ 	ptep = huge_pte_offset(mm, haddr, huge_page_size(h));
++
++	ptl = huge_pte_lock(h, mm, ptep);
++	/*
++ 	 * Here we check for Huge page that are marked as reserved
++ 	 */
++	if(mm && mm->badger_trap_en && (!(flags & FAULT_FLAG_INSTRUCTION)) && ptep)
++	{
++		entry = huge_ptep_get(ptep);
++		if((flags & FAULT_FLAG_WRITE) && is_pte_reserved(entry) && !huge_pte_write(entry) && pte_present(entry))
++		{
++			page = pte_page(entry);
++			get_page(page);
++			if (page != pagecache_page)
++		        lock_page(page);
++			spin_lock(ptl);
++			ret = hugetlb_wp(mm, vma, address, ptep, flags,
++                                                 pagecache_page, ptl);
++			goto out_ptl;
++		}
++		if(is_pte_reserved(entry) && pte_present(entry))
++		{
++			ret = hugetlb_fake_fault(mm, vma, address, ptep, flags);
++			goto out_mutex;
++		}
++		if(pte_present(entry))
++		{
++			*ptep = pte_mkreserve(*ptep);
++		}
++	}
++
+ 	if (ptep) {
+ 		/*
+ 		 * Since we hold no locks, ptep could be stale.  That is
+@@ -6088,8 +6177,6 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		pagecache_page = find_lock_page(mapping, idx);
+ 	}
+ 
+-	ptl = huge_pte_lock(h, mm, ptep);
+-
+ 	/* Check for a racing update before calling hugetlb_wp() */
+ 	if (unlikely(!pte_same(entry, huge_ptep_get(ptep))))
+ 		goto out_ptl;
+diff --git a/mm/memory.c b/mm/memory.c
+index b2d7d1140dd7..8c6a7015e2f5 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -115,6 +115,13 @@ static vm_fault_t do_fault(struct vm_fault *vmf);
+ void *high_memory;
+ EXPORT_SYMBOL(high_memory);
+ 
++extern inline pte_t pte_mkreserve(pte_t pte);
++extern inline pte_t pte_unreserve(pte_t pte);
++extern inline int is_pte_reserved(pte_t pte);
++extern inline pmd_t pmd_mkreserve(pmd_t pmd);
++extern inline pmd_t pmd_unreserve(pmd_t pmd);
++extern inline int is_pmd_reserved(pmd_t pmd);
++
+ /*
+  * Randomize the address space (stacks, mmaps, brk, etc.).
+  *
+@@ -3146,6 +3153,12 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
+ 			entry = maybe_mkwrite(pte_mkdirty(entry), vma);
+ 		}
+ 
++		/* Make the page table entry as reserved for TLB miss tracking */
++		if(mm && (mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
++		{
++			entry = pte_mkreserve(entry);
++		}
++
+ 		/*
+ 		 * Clear the pte entry and flush it first, before updating the
+ 		 * pte with the new entry, to keep TLBs on different CPUs in
+@@ -3975,6 +3988,13 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
+ 		pte = pte_mkuffd_wp(pte);
+ 		pte = pte_wrprotect(pte);
+ 	}
++
++	/* Make the page table entry as reserved for TLB miss tracking */
++	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
++	{
++		pte = pte_mkreserve(pte);
++	}
++
+ 	vmf->orig_pte = pte;
+ 
+ 	/* ksm created a completely new copy */
+@@ -4134,6 +4154,11 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+ 	page_add_new_anon_rmap(page, vma, vmf->address);
+ 	lru_cache_add_inactive_or_unevictable(page, vma);
+ setpte:
++	/* Make the page table entry as reserved for TLB miss tracking */
++	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
++	{
++		entry = pte_mkreserve(entry);
++	}
+ 	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+ 
+ 	/* No need to invalidate - it was non-present before */
+@@ -4159,6 +4184,7 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+ 	vm_fault_t ret;
++	pte_t entry, *ptep;
+ 
+ 	/*
+ 	 * Preallocate pte before we take page_lock because this might lead to
+@@ -4203,6 +4229,15 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
+ 		return poisonret;
+ 	}
+ 
++	/* Make the page table entry as reserved for TLB miss tracking */
++	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION))) {
++		ptep = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
++		entry = *ptep;
++		entry = pte_mkreserve(entry);
++		set_pte_at(vma->vm_mm, vmf->address, ptep, entry);
++    	pte_unmap_unlock(ptep, vmf->ptl);
++	}
++
+ 	if (unlikely(!(ret & VM_FAULT_LOCKED)))
+ 		lock_page(vmf->page);
+ 	else
+@@ -4877,6 +4912,57 @@ static vm_fault_t wp_huge_pud(struct vm_fault *vmf, pud_t orig_pud)
+ 	return VM_FAULT_FALLBACK;
+ }
+ 
++/*
++ * This function handles the fake page fault introduced to perform TLB miss
++ * studies. We can perform our work in this fuction on the page table entries.
++ */
++static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
++		unsigned long address, pte_t *page_table, pmd_t *pmd,
++		unsigned int flags, spinlock_t *ptl)
++{
++        unsigned long *touch_page_addr;
++        unsigned long touched;
++	unsigned long ret;
++	static unsigned int consecutive = 0;
++	static unsigned long prev_address = 0;
++
++	if(address == prev_address)
++		consecutive++;
++	else
++	{
++		consecutive = 0;
++		prev_address = address;
++	}
++
++	if(consecutive > 1)
++	{
++		*page_table = pte_unreserve(*page_table);
++		pte_unmap_unlock(page_table, ptl);
++		return 0;
++	}
++
++	if(flags & FAULT_FLAG_WRITE)
++		*page_table = pte_mkdirty(*page_table);
++
++	*page_table = pte_mkyoung(*page_table);
++	*page_table = pte_unreserve(*page_table);
++
++	touch_page_addr = (void *)(address & PAGE_MASK);
++	ret = copy_from_user(&touched, (__force const void __user *)touch_page_addr, sizeof(unsigned long));
++
++	if(ret)
++		return VM_FAULT_SIGBUS;
++
++	/* Here where we do all our analysis */
++	current->total_dtlb_4k_misses++;
++	current->total_dtlb_misses++;
++
++	*page_table = pte_mkreserve(*page_table);
++	pte_unmap_unlock(page_table, ptl);
++
++	return 0;
++}
++
+ /*
+  * These routines also need to handle stuff like marking pages dirty
+  * and/or accessed for architectures that don't do it in hardware (most
+@@ -4895,6 +4981,49 @@ static vm_fault_t wp_huge_pud(struct vm_fault *vmf, pud_t orig_pud)
+ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+ {
+ 	pte_t entry;
++	struct vm_area_struct *vma = vmf->vma;
++	struct mm_struct *mm = vma->vm_mm;
++	pte_t* page_table;
++
++	if(mm && mm->badger_trap_en && (vmf->flags & FAULT_FLAG_INSTRUCTION))
++	{
++                if(is_pte_reserved(*vmf->pte))
++                        *vmf->pte = pte_unreserve(*vmf->pte);
++	}
++
++	/* We need to figure out if the page fault is a fake page fault or not.
++ 	 * If it is a fake page fault, we need to handle it specially. It has to
++ 	 * be made sure that the special page fault is not on instruction fault.
++ 	 * Our technique cannot not handle instruction page fault yet.
++ 	 *
++ 	 * We can have two cases when we have a fake page fault:
++ 	 * 1. We have taken a fake page fault on a COW page. A 
++ 	 * 	fake page fault on a COW page if for reading only
++ 	 * 	has to be considered a normal fake page fault. But
++ 	 * 	for writing purposes need to be handled correctly.
++ 	 * 2. We have taken a fake page fault on a normal page.
++ 	 */
++	if(mm && mm->badger_trap_en && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)) && pte_present(*vmf->pte))
++	{
++		page_table = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
++		entry = *page_table;
++		if((vmf->flags & FAULT_FLAG_WRITE) && is_pte_reserved(entry) && !pte_write(entry))
++		{
++			pte_unmap_unlock(page_table, vmf->ptl);
++			vmf->ptl = pte_lockptr(mm,vmf->pmd);
++			spin_lock(vmf->ptl);
++			entry = *vmf->pte;
++			return do_wp_page(vmf);
++		}
++		else if(is_pte_reserved(entry))
++		{
++			return do_fake_page_fault(mm, vmf->vma, vmf->address,
++						 page_table, vmf->pmd, vmf->flags, vmf->ptl);
++		}
++
++		*page_table = pte_mkreserve(*page_table);
++		pte_unmap_unlock(page_table, vmf->ptl);
++	}
+ 
+ 	if (unlikely(pmd_none(*vmf->pmd))) {
+ 		/*
+@@ -4993,6 +5122,49 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+ 	return 0;
+ }
+ 
++static int transparent_fake_fault(struct mm_struct *mm, struct vm_area_struct *vma,
++                        unsigned long address, pmd_t *page_table, unsigned int flags)
++{
++        unsigned long *touch_page_addr;
++        unsigned long touched;
++        unsigned long ret;
++        static unsigned int consecutive = 0;
++        static unsigned long prev_address = 0;
++
++        if(address == prev_address)
++                consecutive++;
++        else
++        {
++                consecutive = 0;
++                prev_address = address;
++        }
++
++        if(consecutive > 1)
++        {
++                *page_table = pmd_unreserve(*page_table);
++                return 0;
++        }
++
++        if(flags & FAULT_FLAG_WRITE)
++                *page_table = pmd_mkdirty(*page_table);
++
++        *page_table = pmd_mkyoung(*page_table);
++        *page_table = pmd_unreserve(*page_table);
++
++        touch_page_addr = (void *)(address & PAGE_MASK);
++        ret = copy_from_user(&touched, (__force const void __user *)touch_page_addr, sizeof(unsigned long));
++
++        if(ret)
++                return VM_FAULT_SIGBUS;
++
++        /* Here where we do all our analysis */
++        current->total_dtlb_hugetlb_misses++;
++        current->total_dtlb_misses++;
++
++        *page_table = pmd_mkreserve(*page_table);
++        return 0;
++}
++
+ /*
+  * By the time we get here, we already hold the mm semaphore
+  *
+@@ -5014,6 +5186,7 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
+ 	unsigned long vm_flags = vma->vm_flags;
+ 	pgd_t *pgd;
+ 	p4d_t *p4d;
++	pmd_t entry;
+ 	vm_fault_t ret;
+ 
+ 	pgd = pgd_offset(mm, address);
+@@ -5051,6 +5224,33 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
+ 		}
+ 	}
+ 
++	vmf.pmd = pmd_offset(vmf.pud, address);
++
++	/*
++ 	 * Here we check for transparent huge page that are marked as reserved
++	 */
++	if(mm && mm->badger_trap_en && (!(flags & FAULT_FLAG_INSTRUCTION)) && vmf.pmd && pmd_trans_huge(*vmf.pmd))
++	{
++		spin_lock(&mm->page_table_lock);
++		entry = *vmf.pmd;
++		if((flags & FAULT_FLAG_WRITE) && is_pmd_reserved(entry) && !pmd_write(entry) && pmd_present(entry))
++		{
++			spin_unlock(&mm->page_table_lock);
++			return do_huge_pmd_wp_page(&vmf);
++		}
++		if(is_pmd_reserved(entry) && pmd_present(entry))
++		{
++			ret = transparent_fake_fault(mm, vma, address, vmf.pmd, flags);
++			spin_unlock(&mm->page_table_lock);
++			return ret;
++		}
++		if(pmd_present(entry))
++		{
++			*vmf.pmd = pmd_mkreserve(*vmf.pmd);
++		}
++		spin_unlock(&mm->page_table_lock);
++	}
++
+ 	vmf.pmd = pmd_alloc(mm, vmf.pud, address);
+ 	if (!vmf.pmd)
+ 		return VM_FAULT_OOM;
+-- 
+2.49.0
+

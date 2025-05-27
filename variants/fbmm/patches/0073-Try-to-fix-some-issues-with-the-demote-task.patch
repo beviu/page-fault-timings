@@ -1,0 +1,142 @@
+From defd2c95d3f3ecbd45f32bf701b29cb20e2e9e71 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Fri, 28 Oct 2022 13:02:15 -0500
+Subject: [PATCH 073/179] Try to fix some issues with the demote task.
+
+There seemed to be some race conditions with the vma not existing
+when a memory region is upapped, so the vma is removed, but we haven't
+removed the page from the active lists.
+---
+ FOMTierFS/fs.c | 74 +++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 55 insertions(+), 19 deletions(-)
+
+diff --git a/FOMTierFS/fs.c b/FOMTierFS/fs.c
+index 7f79d86deddb..2ff89f107ce6 100644
+--- a/FOMTierFS/fs.c
++++ b/FOMTierFS/fs.c
+@@ -226,8 +226,26 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
+     i_mmap_lock_read(as);
+ 
+     vma = vma_interval_tree_iter_first(&as->i_mmap, page->page_offset, page->page_offset);
++    if (!vma) {
++        list_add(&page->list, &fast_dev->active_list);
++        fast_dev->active_pages++;
++
++        i_mmap_unlock_read(as);
++        spin_unlock(&page->lock);
++        spin_unlock(&fast_dev->lock);
++        return;
++    }
+     virt_addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
+     ptep = fomtierfs_find_pte(vma, virt_addr);
++    if (!ptep || !pte_present(*ptep)) {
++        list_add(&page->list, &fast_dev->active_list);
++        fast_dev->active_pages++;
++
++        i_mmap_unlock_read(as);
++        spin_unlock(&page->lock);
++        spin_unlock(&fast_dev->lock);
++        return;
++    }
+ 
+     accessed = pte_young(*ptep);
+     last_accessed = page->last_accessed;
+@@ -351,8 +369,26 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
+     i_mmap_lock_read(as);
+ 
+     vma = vma_interval_tree_iter_first(&as->i_mmap, page->page_offset, page->page_offset);
++    if (!vma) {
++        list_add(&page->list, &slow_dev->active_list);
++        slow_dev->active_pages++;
++
++        i_mmap_unlock_read(as);
++        spin_unlock(&page->lock);
++        spin_unlock(&slow_dev->lock);
++        return;
++    }
+     virt_addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
+     ptep = fomtierfs_find_pte(vma, virt_addr);
++    if (!ptep || !pte_present(*ptep)) {
++        list_add(&page->list, &slow_dev->active_list);
++        slow_dev->active_pages++;
++
++        i_mmap_unlock_read(as);
++        spin_unlock(&page->lock);
++        spin_unlock(&slow_dev->lock);
++        return;
++    }
+ 
+     accessed = pte_young(*ptep);
+     last_accessed = page->last_accessed;
+@@ -381,6 +417,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
+     // Make sure the page is still mapped to a file
+     if (!page->inode) {
+         spin_unlock(&page->lock);
++        spin_unlock(&(*fast_page)->lock);
+         return;
+     }
+ 
+@@ -528,7 +565,7 @@ static int fomtierfs_demote_task(void *data)
+             fast_page = NULL;
+         }
+ 
+-        msleep_interruptible(5000);
++        msleep_interruptible(500);
+     }
+     return 0;
+ }
+@@ -658,34 +695,33 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
+             return -ENOMEM;
+         }
+ 
+-        // Update the metadata to reflect the new mapping
+-        write_lock(&inode_info->map_lock);
+-        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
+-            BUG();
+-        }
+-        write_unlock(&inode_info->map_lock);
+-
+         // Set the page table for this page
+         spin_lock(&page->lock);
+         i_mmap_lock_read(as);
+ 
+-        vma = vma_interval_tree_iter_first(&as->i_mmap, offset, offset + len);
++        vma = vma_interval_tree_iter_first(&as->i_mmap, page->page_offset, page->page_offset);
+         virt_addr = vma->vm_start + (off - (vma->vm_pgoff << PAGE_SHIFT));
+         ptep = fomtierfs_find_pte(vma, virt_addr);
+-        if (!ptep)
+-            goto unlock;
+-
+-        pfn = sbi->mem[page->type].pfn.val + page->page_num;
+-        pte = pfn_pte(pfn, vma->vm_page_prot);
+-        pte = pte_mkdevmap(pte);
+-        if (vma->vm_flags & VM_WRITE)
+-            pte = pte_mkwrite(pte);
+-        set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
+ 
+-unlock:
++        if (ptep) {
++            pfn = sbi->mem[page->type].pfn.val + page->page_num;
++            pte = pfn_pte(pfn, vma->vm_page_prot);
++            pte = pte_mkdevmap(pte);
++            if (vma->vm_flags & VM_WRITE)
++                pte = pte_mkwrite(pte);
++            set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
++        }
++
+         i_mmap_unlock_read(as);
+         spin_unlock(&page->lock);
+ 
++        // Update the metadata to reflect the new mapping
++        write_lock(&inode_info->map_lock);
++        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
++            BUG();
++        }
++        write_unlock(&inode_info->map_lock);
++
+     }
+     __flush_tlb_all();
+ 
+-- 
+2.49.0
+

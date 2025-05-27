@@ -1,0 +1,719 @@
+From c149b7a299427cbdfa653e9209f63c2150f3de2d Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Mon, 25 Mar 2024 10:51:06 -0500
+Subject: [PATCH 158/179] FBMM: Work on library function to swap pages out
+
+Note that while code exists to swap pages in that is untested.
+---
+ BasicMMFS/basic.c             |  83 +++++++++-
+ include/linux/file_based_mm.h |  15 ++
+ include/linux/mm.h            |   2 +
+ include/linux/swap.h          |   1 +
+ mm/Makefile                   |   2 +-
+ mm/fbmm_helpers.c             | 285 ++++++++++++++++++++++++++++++++++
+ mm/file_based_mm.c            |  49 ++++++
+ mm/internal.h                 |  13 ++
+ mm/memory.c                   |   3 +
+ mm/mmap.c                     |   4 +-
+ mm/swapfile.c                 |   2 +-
+ mm/vmscan.c                   |  14 +-
+ 12 files changed, 455 insertions(+), 18 deletions(-)
+ create mode 100644 mm/fbmm_helpers.c
+
+diff --git a/BasicMMFS/basic.c b/BasicMMFS/basic.c
+index ef781a26bf7f..26ab04707282 100644
+--- a/BasicMMFS/basic.c
++++ b/BasicMMFS/basic.c
+@@ -11,6 +11,7 @@
+ #include <linux/string.h>
+ #include <linux/falloc.h>
+ #include <linux/pagewalk.h>
++#include <linux/file_based_mm.h>
+ 
+ #include "basic.h"
+ 
+@@ -49,7 +50,6 @@ struct page *basicmmfs_alloc_page(struct basicmmfs_inode_info *inode_info, struc
+     page = list_first_entry(&sbi->free_list, struct page, lru);
+     list_del(&page->lru);
+     sbi->free_pages--;
+-    get_page(page);
+ 
+     // Clear the page outside of the critical section
+     spin_unlock(&sbi->lock);
+@@ -91,7 +91,10 @@ int basicmmfs_free_pte(pte_t *pte, unsigned long addr, unsigned long next,
+     struct page *page;
+ 
+     // just the pte_none check is probably enough, but check pte_present to be safe
+-    if (pte_none(*pte) && !pte_present(*pte)) {
++    if (!pte) {
++        goto end;
++    }
++    if (pte_none(*pte) || !pte_present(*pte)) {
+         goto end;
+     }
+ 
+@@ -146,6 +149,7 @@ void basicmmfs_free_range(struct inode *inode, u64 offset, loff_t len)
+ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+ {
+     struct vm_area_struct *vma = vmf->vma;
++    struct address_space *mapping = vma->vm_file->f_mapping;
+     struct inode *inode = vma->vm_file->f_inode;
+     struct basicmmfs_inode_info *inode_info;
+     struct basicmmfs_sb_info *sbi;
+@@ -182,6 +186,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+             ret = VM_FAULT_OOM;
+             goto unlock;
+         }
++        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
+     }
+ 
+ 
+@@ -271,6 +276,7 @@ const struct inode_operations basicmmfs_file_inode_operations = {
+ const struct address_space_operations basicmmfs_aops = {
+     .direct_IO = noop_direct_IO,
+     .dirty_folio = noop_dirty_folio,
++    .writepage = fbmm_writepage,
+ };
+ 
+ struct inode *basicmmfs_get_inode(struct super_block *sb,
+@@ -412,11 +418,84 @@ static int basicmmfs_show_options(struct seq_file *m, struct dentry *root)
+     return 0;
+ }
+ 
++#define BASICMMFS_MAX_PAGEOUT 512
++static long basicmmfs_nr_cached_objects(struct super_block *sb, struct shrink_control *sc)
++{
++    struct basicmmfs_sb_info *sbi = BMMFS_SB(sb);
++    long nr = 0;
++
++    spin_lock(&sbi->lock);
++    if (sbi->free_pages > 0)
++        nr = sbi->free_pages;
++    else
++        nr = max(sbi->num_pages - sbi->free_pages, (u64)BASICMMFS_MAX_PAGEOUT);
++    spin_unlock(&sbi->lock);
++
++    return nr;
++}
++
++static long basicmmfs_free_cached_objects(struct super_block *sb, struct shrink_control *sc)
++{
++    LIST_HEAD(folio_list);
++    LIST_HEAD(fail_list);
++    struct basicmmfs_sb_info *sbi = BMMFS_SB(sb);
++    struct page *page;
++    u64 i, num_scanned;
++
++    if (sbi->free_pages > 0) {
++        spin_lock(&sbi->lock);
++        for (i = 0; i < sc->nr_to_scan && i < sbi->free_pages; i++) {
++            page = list_first_entry(&sbi->free_list, struct page, lru);
++            list_del(&page->lru);
++            put_page(page);
++        }
++
++        sbi->num_pages -= i;
++        sbi->free_pages -= i;
++        spin_unlock(&sbi->lock);
++    } else if (sbi->num_pages > 0) {
++        spin_lock(&sbi->lock);
++        for (i = 0; i < sc->nr_to_scan && sbi->num_pages > 0; i++) {
++            page = list_first_entry(&sbi->active_list, struct page, lru);
++            list_move(&page->lru, &folio_list);
++            sbi->num_pages--;
++        }
++        spin_unlock(&sbi->lock);
++
++        num_scanned = i;
++        for (i = 0; i < num_scanned && !list_empty(&folio_list); i++) {
++            page = list_first_entry(&folio_list, struct page, lru);
++            list_del(&page->lru);
++            if (!fbmm_swapout_folio(page_folio(page))) {
++                pr_err("swapout err\n");
++                list_add_tail(&page->lru, &fail_list);
++            } else {
++                put_page(page);
++            }
++        }
++
++        spin_lock(&sbi->lock);
++        while (!list_empty(&fail_list)) {
++            page = list_first_entry(&fail_list, struct page, lru);
++            list_del(&page->lru);
++            list_add_tail(&page->lru, &sbi->active_list);
++            sbi->num_pages++;
++        }
++        spin_unlock(&sbi->lock);
++
++    }
++
++    sc->nr_scanned = i;
++    return i;
++}
++
+ static const struct super_operations basicmmfs_ops = {
+     .statfs = basicmmfs_statfs,
+     .free_inode = basicmmfs_free_inode,
+     .drop_inode = generic_delete_inode,
+     .show_options = basicmmfs_show_options,
++    .nr_cached_objects = basicmmfs_nr_cached_objects,
++    .free_cached_objects = basicmmfs_free_cached_objects,
+ };
+ 
+ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
+diff --git a/include/linux/file_based_mm.h b/include/linux/file_based_mm.h
+index 690dcd2423a5..8a47262e93bd 100644
+--- a/include/linux/file_based_mm.h
++++ b/include/linux/file_based_mm.h
+@@ -10,6 +10,8 @@ extern const struct file_operations proc_fbmm_mnt_dir;
+ 
+ bool use_file_based_mm(pid_t pid);
+ 
++bool is_vm_fbmm_page(struct vm_area_struct *vma);
++int fbmm_fault(struct vm_area_struct *vma, unsigned long address, unsigned int flags);
+ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags);
+ struct file *fbmm_get_file(unsigned long addr, unsigned long len, unsigned long prot, int flags, bool mmap, unsigned long *pgoff);
+ void fbmm_populate_file(unsigned long start, unsigned long len);
+@@ -17,12 +19,25 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len);
+ void fbmm_check_exiting_proc(pid_t pid);
+ int fbmm_copy_mnt_dir(pid_t src, pid_t dst);
+ 
++// FBMM Helper functions for MFSs
++bool fbmm_swapout_folio(struct folio *folio);
++int fbmm_writepage(struct page *page, struct writeback_control *wbc);
++struct folio *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff);
++
+ #else //CONFIG_FILE_BASED_MM
+ 
++inline bool is_vm_fbmm_page(struct vm_area_struct *vma) {
++    return 0;
++}
++
+ inline bool use_file_based_mm(pid_t pid) {
+ 	return false;
+ }
+ 
++int fbmm_fault(struct vm_area_struct *vma, unsigned long address, unsigned int flags) {
++    return 0;
++}
++
+ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags) {
+ 	return 0;
+ }
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index f13f20258ce9..5894d744125d 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -321,11 +321,13 @@ extern unsigned int kobjsize(const void *objp);
+ #define VM_HIGH_ARCH_BIT_2	34	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_BIT_3	35	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_BIT_4	36	/* bit only usable on 64-bit architectures */
++#define VM_HIGH_ARCH_BIT_5	37	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_0	BIT(VM_HIGH_ARCH_BIT_0)
+ #define VM_HIGH_ARCH_1	BIT(VM_HIGH_ARCH_BIT_1)
+ #define VM_HIGH_ARCH_2	BIT(VM_HIGH_ARCH_BIT_2)
+ #define VM_HIGH_ARCH_3	BIT(VM_HIGH_ARCH_BIT_3)
+ #define VM_HIGH_ARCH_4	BIT(VM_HIGH_ARCH_BIT_4)
++#define VM_FBMM         BIT(VM_HIGH_ARCH_BIT_5)
+ #endif /* CONFIG_ARCH_USES_HIGH_VMA_FLAGS */
+ 
+ #ifdef CONFIG_ARCH_HAS_PKEYS
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+index 0ceed49516ad..50e1fc565f8f 100644
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -482,6 +482,7 @@ static inline long get_nr_swap_pages(void)
+ 
+ extern void si_swapinfo(struct sysinfo *);
+ swp_entry_t folio_alloc_swap(struct folio *folio);
++bool folio_swapped(struct folio *folio);
+ bool folio_free_swap(struct folio *folio);
+ void put_swap_folio(struct folio *folio, swp_entry_t entry);
+ extern swp_entry_t get_swap_page_of_type(int);
+diff --git a/mm/Makefile b/mm/Makefile
+index 4c0378f34134..82591f465e66 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -138,4 +138,4 @@ obj-$(CONFIG_IO_MAPPING) += io-mapping.o
+ obj-$(CONFIG_HAVE_BOOTMEM_INFO_NODE) += bootmem_info.o
+ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
+ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
+-obj-$(CONFIG_FILE_BASED_MM) += file_based_mm.o
++obj-$(CONFIG_FILE_BASED_MM) += file_based_mm.o fbmm_helpers.o
+diff --git a/mm/fbmm_helpers.c b/mm/fbmm_helpers.c
+new file mode 100644
+index 000000000000..f96715758229
+--- /dev/null
++++ b/mm/fbmm_helpers.c
+@@ -0,0 +1,285 @@
++#include <linux/types.h>
++#include <linux/file_based_mm.h>
++#include <linux/mm.h>
++#include <linux/mm_types.h>
++#include <linux/swap.h>
++#include <linux/swapops.h>
++#include <linux/rmap.h>
++#include <linux/blkdev.h>
++#include <linux/frontswap.h>
++#include <linux/mmu_notifier.h>
++#include <linux/swap_slots.h>
++
++#include "internal.h"
++#include "swap.h"
++
++static bool fbmm_try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
++				unsigned long address, void *arg)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
++	pte_t pteval, swp_pte;
++	swp_entry_t entry;
++	struct page *page;
++	bool ret = true;
++	struct mmu_notifier_range range;
++
++	range.end = vma_address_end(&pvmw);
++	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, vma->vm_mm,
++							address, range.end);
++	mmu_notifier_invalidate_range_start(&range);
++
++	while (page_vma_mapped_walk(&pvmw)) {
++		// Unexpected PMD-mapped thing
++		VM_BUG_ON_FOLIO(!pvmw.pte, folio);
++
++		page = folio_page(folio, pte_pfn(*pvmw.pte) - folio_pfn(folio));
++		address = pvmw.address;
++
++		// Nuke the page table entry
++		pteval = ptep_clear_flush(vma, address, pvmw.pte);
++
++		if (pte_dirty(pteval))
++			folio_mark_dirty(folio);
++
++		entry.val = page_private(page);
++
++		// Increase the ref count on entry
++		if (swap_duplicate(entry) < 0) {
++			set_pte_at(mm, address, pvmw.pte, pteval);
++			ret = false;
++			page_vma_mapped_walk_done(&pvmw);
++			break;
++		}
++
++		dec_mm_counter(mm, MM_FILEPAGES);
++		inc_mm_counter(mm, MM_SWAPENTS);
++		swp_pte = swp_entry_to_pte(entry);
++		if (pte_soft_dirty(pteval))
++			swp_pte = pte_swp_mksoft_dirty(swp_pte);
++
++		set_pte_at(mm, address, pvmw.pte, swp_pte);
++		BUG_ON(pte_present(swp_pte));
++		// invalidate as we cleared the pte
++		mmu_notifier_invalidate_range(mm, address, address + PAGE_SIZE);
++
++		page_remove_rmap(page, vma, false);
++		folio_put(folio);
++	}
++
++	mmu_notifier_invalidate_range_end(&range);
++
++	return ret;
++}
++
++static int folio_not_mapped(struct folio *folio) {
++	return !folio_mapped(folio);
++}
++
++static void fbmm_try_to_unmap(struct folio *folio)
++{
++	struct rmap_walk_control rwc = {
++		.rmap_one = fbmm_try_to_unmap_one,
++		.arg = NULL,
++		.done = folio_not_mapped,
++	};
++
++	rmap_walk(folio, &rwc);
++}
++
++bool fbmm_swapout_folio(struct folio *folio) {
++	struct address_space *mapping;
++    struct swap_info_struct *si;
++	unsigned long offset;
++	struct swap_iocb *plug = NULL;
++	swp_entry_t entry;
++
++	if (!folio_trylock(folio))
++		return false;
++
++	// Allocate swap space
++	entry = folio_alloc_swap(folio);
++	if (!entry.val)
++		goto unlock;
++
++	offset = swp_offset(entry);
++	si = get_swap_device(entry);
++
++	// Associate the folio with the swap entry
++	set_page_private(folio_page(folio, 0), entry.val);
++
++	folio_mark_dirty(folio);
++
++	if (folio_ref_count(folio) != 3) {
++		pr_err("folio ref should be 3, is %d\n", folio_ref_count(folio));
++		BUG();
++	}
++
++	// We need to unmap this folio from every process it's mapped to
++	if (folio_mapped(folio)) {
++		fbmm_try_to_unmap(folio);
++		if (folio_mapped(folio)) {
++            pr_err("folio still mapped\n");
++			goto unlock;
++		}
++	}
++
++	if (folio_ref_count(folio) != 2) {
++		pr_err("folio ref should be 2, is %d\n", folio_ref_count(folio));
++		BUG();
++	}
++
++	mapping = folio_mapping(folio);
++	if (folio_test_dirty(folio)) {
++		try_to_unmap_flush_dirty();
++		switch (pageout(folio, mapping, &plug)) {
++			case PAGE_KEEP:
++				fallthrough;
++			case PAGE_ACTIVATE:
++				goto unlock;
++			case PAGE_SUCCESS:
++				// pageout eventually unlocks the folio for some reason on success...
++				if (!folio_trylock(folio)) {
++					pr_err("failed lock\n");
++					return false;
++				}
++				fallthrough;
++			case PAGE_CLEAN:
++				;
++		}
++	}
++
++	if (!remove_mapping(mapping, folio)) {
++		pr_err("error removing mapping %d %ld\n", folio_ref_count(folio), (long int)folio_get_private(folio));
++	} else if (folio_ref_count(folio) != 1) {
++		pr_err("folio ref should be 1, is %d\n", folio_ref_count(folio));
++	}
++	folio_unlock(folio);
++
++	si = get_swap_device(entry);
++	si->swap_map[offset] &= ~SWAP_HAS_CACHE;
++
++	return true;
++
++unlock:
++    pr_err("unlock\n");
++	folio_unlock(folio);
++	return false;
++}
++EXPORT_SYMBOL(fbmm_swapout_folio);
++
++void fbmm_end_swap_bio_write(struct bio *bio) {
++
++	struct page *page = bio_first_page_all(bio);
++	struct folio *folio = page_folio(page);
++	int ret;
++
++	// This is the simplification of __folio_end_writeback
++	ret = folio_test_clear_writeback(folio);
++	if (!ret) {
++		pr_err("Writtenback page didn't have writeback flag?\n");
++		BUG();
++	}
++	if (folio_ref_count(folio) != 2) {
++		pr_err("end_swap folio count %d %ld\n", folio_ref_count(folio), (long int)folio_get_private(folio));
++	}
++
++	sb_clear_inode_writeback(folio_mapping(folio)->host);
++
++	// Simplification of folio_end_writeback
++	smp_mb__after_atomic();
++	acct_reclaim_writeback(folio);
++}
++
++// Analogue to __swap_writepage
++static int __fbmm_writepage(struct page *page, struct writeback_control *wbc)
++{
++	struct bio bio;
++	struct bio_vec bv;
++	int ret;
++	struct swap_info_struct *sis = page_swap_info(page);
++
++	ret = bdev_write_page(sis->bdev, swap_page_sector(page), page, wbc);
++	if (!ret) {
++		// bdev_write_page unlocks the page on success
++		count_vm_events(PSWPOUT, thp_nr_pages(page));
++		return 0;
++	}
++
++	// This seems to be a backup if bdev_write_page doesn't work?
++	bio_init(&bio, sis->bdev, &bv, 1,
++			REQ_OP_WRITE | REQ_SWAP | wbc_to_write_flags(wbc));
++	bio.bi_iter.bi_sector = swap_page_sector(page);
++	bio_add_page(&bio, page, thp_size(page), 0);
++
++	count_vm_events(PSWPOUT, thp_nr_pages(page));
++	set_page_writeback(page);
++	unlock_page(page);
++
++	submit_bio_wait(&bio);
++	fbmm_end_swap_bio_write(&bio);
++
++	return 0;
++}
++
++int fbmm_writepage(struct page *page, struct writeback_control *wbc)
++{
++	struct folio *folio = page_folio(page);
++	int ret = 0;
++
++	ret = arch_prepare_to_swap(&folio->page);
++	if (ret) {
++		folio_mark_dirty(folio);
++		folio_unlock(folio);
++		return 0;
++	}
++
++	if (frontswap_store(&folio->page) == 0) {
++		folio_start_writeback(folio);
++		folio_unlock(folio);
++		folio_end_writeback(folio);
++		return 0;
++	}
++
++	return __fbmm_writepage(page, wbc);
++}
++EXPORT_SYMBOL(fbmm_writepage);
++
++struct folio *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff)
++{
++	struct vm_area_struct *vma = vmf->vma;
++	struct address_space *mapping = vma->vm_file->f_mapping;
++    struct swap_info_struct *si;
++	struct folio *folio;
++    struct page *page;
++
++	if (unlikely(non_swap_entry(entry)))
++		return NULL;
++
++	// If a folio is already mapped here, just return that.
++	// Another process has probably already brought in the shared page
++	folio = filemap_get_folio(mapping, pgoff);
++	if (folio)
++		return folio;
++
++    si = get_swap_device(entry);
++    if (!si)
++        return NULL;
++
++    // Do we need to zero if we're going to overwrite it anyway? I don't think so?
++    folio = folio_alloc(GFP_HIGHUSER, 0);
++    if (!folio)
++        return NULL;
++    page = &folio->page;
++
++    folio_set_swap_entry(folio, entry);
++    swap_readpage(page, true, NULL);
++    folio->private = NULL;
++
++    __filemap_add_folio(mapping, folio, pgoff, GFP_KERNEL, NULL);
++
++    swap_free(entry);
++
++	return folio;
++}
++EXPORT_SYMBOL(fbmm_read_swap_entry);
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index ffa11c845bd9..21a0a4da7acc 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -12,6 +12,8 @@
+ #include <linux/maple_tree.h>
+ #include <linux/sched.h>
+ #include <linux/kthread.h>
++#include <linux/pagemap.h>
++#include <linux/mm.h>
+ 
+ enum file_based_mm_state {
+ 	FBMM_OFF = 0,
+@@ -283,8 +285,52 @@ static void drop_fbmm_file(struct fbmm_file *file) {
+ 	kfree(file);
+ }
+ 
++static pmdval_t fbmm_alloc_pmd(struct vm_fault *vmf) {
++	struct mm_struct *mm = vmf->vma->vm_mm;
++	unsigned long address = vmf->address;
++	pgd_t *pgd;
++	p4d_t *p4d;
++
++	pgd = pgd_offset(mm, address);
++	p4d = p4d_alloc(mm, pgd, address);
++	if (!p4d)
++		return VM_FAULT_OOM;
++
++	vmf->pud = pud_alloc(mm, p4d, address);
++	if (!vmf->pud)
++		return VM_FAULT_OOM;
++
++	vmf->pmd = pmd_alloc(mm, vmf->pud, address);
++	if (!vmf->pmd)
++		return VM_FAULT_OOM;
++
++	vmf->orig_pmd = pmdp_get_lockless(vmf->pmd);
++
++	return pmd_val(*vmf->pmd);
++}
++
+ ///////////////////////////////////////////////////////////////////////////////
+ // External API functions
++inline bool is_vm_fbmm_page(struct vm_area_struct *vma) {
++    return !!(vma->vm_flags & VM_FBMM);
++}
++
++int fbmm_fault(struct vm_area_struct *vma, unsigned long address, unsigned int flags) {
++	struct vm_fault vmf = {
++		.vma = vma,
++		.address = address & PAGE_MASK,
++		.real_address = address,
++		.flags = flags,
++		.pgoff = linear_page_index(vma, address),
++		.gfp_mask = mapping_gfp_mask(vma->vm_file->f_mapping) | __GFP_FS | __GFP_IO,
++		//.gfp_mask = __get_fault_gfp_mask(vma),
++	};
++
++	if (fbmm_alloc_pmd(&vmf) == VM_FAULT_OOM)
++		return VM_FAULT_OOM;
++
++	return vma->vm_ops->fault(&vmf);
++}
+ 
+ bool use_file_based_mm(pid_t pid) {
+ 	if (fbmm_state == FBMM_OFF) {
+@@ -561,6 +607,9 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
+ 	return mtree_store(&fbmm_proc_mt, dst, new_proc, GFP_KERNEL);
+ }
+ 
++///////////////////////////////////////////////////////////////////////////////
++// MFS Helper Functions
++
+ ///////////////////////////////////////////////////////////////////////////////
+ // sysfs files
+ static ssize_t fbmm_state_show(struct kobject *kobj,
+diff --git a/mm/internal.h b/mm/internal.h
+index bcf75a8b032d..68869b166f63 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -848,4 +848,17 @@ static inline bool vma_soft_dirty_enabled(struct vm_area_struct *vma)
+ 	return !(vma->vm_flags & VM_SOFTDIRTY);
+ }
+ 
++/* possible outcome of pageout() */
++typedef enum {
++	/* failed to write folio out, folio is locked */
++	PAGE_KEEP,
++	/* move folio to the active list, folio is locked */
++	PAGE_ACTIVATE,
++	/* folio has been sent to the disk successfully, folio is unlocked */
++	PAGE_SUCCESS,
++	/* folio is clean and locked */
++	PAGE_CLEAN,
++} pageout_t;
++pageout_t pageout(struct folio *folio, struct address_space *mapping,
++			 struct swap_iocb **plug);
+ #endif	/* __MM_INTERNAL_H */
+diff --git a/mm/memory.c b/mm/memory.c
+index 7e589a644af6..327480c48d5d 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -77,6 +77,7 @@
+ #include <linux/ptrace.h>
+ #include <linux/vmalloc.h>
+ #include <linux/sched/sysctl.h>
++#include <linux/file_based_mm.h>
+ 
+ #include <trace/events/kmem.h>
+ 
+@@ -5470,6 +5471,8 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+ 
+ 	if (unlikely(is_vm_hugetlb_page(vma)))
+ 		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
++	else if (unlikely(is_vm_fbmm_page(vma)))
++		ret = fbmm_fault(vma, address, flags);
+ 	else
+ 		ret = __handle_mm_fault(vma, address, flags);
+ 
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 59844b6879bb..10d195237c26 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -261,7 +261,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
+ 
+ 	/* Ok, looks good - let it rip. */
+ 	if (use_file_based_mm(current->tgid)) {
+-		vm_flags_t vm_flags;
++		vm_flags_t vm_flags = VM_FBMM;
+ 		unsigned long prot = PROT_READ | PROT_WRITE;
+ 		unsigned long pgoff = 0;
+ 		struct file *f = fbmm_get_file(oldbrk, newbrk-oldbrk, prot, 0, false, &pgoff);
+@@ -1347,6 +1347,8 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 	 */
+ 	vm_flags = calc_vm_prot_bits(prot, pkey) | calc_vm_flag_bits(flags) |
+ 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
++	if (created_fbmm_file)
++		vm_flags |= VM_FBMM;
+ 
+ 	if (flags & MAP_LOCKED)
+ 		if (!can_do_mlock())
+diff --git a/mm/swapfile.c b/mm/swapfile.c
+index 36899c425301..68bc354d2f3e 100644
+--- a/mm/swapfile.c
++++ b/mm/swapfile.c
+@@ -1554,7 +1554,7 @@ static bool swap_page_trans_huge_swapped(struct swap_info_struct *si,
+ 	return ret;
+ }
+ 
+-static bool folio_swapped(struct folio *folio)
++bool folio_swapped(struct folio *folio)
+ {
+ 	swp_entry_t entry = folio_swap_entry(folio);
+ 	struct swap_info_struct *si = _swap_info_get(entry);
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 8168fee6a85b..04fdee8e0839 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -1233,23 +1233,11 @@ void __acct_reclaim_writeback(pg_data_t *pgdat, struct folio *folio,
+ 		wake_up(&pgdat->reclaim_wait[VMSCAN_THROTTLE_WRITEBACK]);
+ }
+ 
+-/* possible outcome of pageout() */
+-typedef enum {
+-	/* failed to write folio out, folio is locked */
+-	PAGE_KEEP,
+-	/* move folio to the active list, folio is locked */
+-	PAGE_ACTIVATE,
+-	/* folio has been sent to the disk successfully, folio is unlocked */
+-	PAGE_SUCCESS,
+-	/* folio is clean and locked */
+-	PAGE_CLEAN,
+-} pageout_t;
+-
+ /*
+  * pageout is called by shrink_folio_list() for each dirty folio.
+  * Calls ->writepage().
+  */
+-static pageout_t pageout(struct folio *folio, struct address_space *mapping,
++pageout_t pageout(struct folio *folio, struct address_space *mapping,
+ 			 struct swap_iocb **plug)
+ {
+ 	/*
+-- 
+2.49.0
+

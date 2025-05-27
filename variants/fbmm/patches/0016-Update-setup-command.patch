@@ -1,0 +1,22 @@
+From 94d9de507de430c5502b0bf6041d9d23ffc09782 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Tue, 19 Oct 2021 16:27:35 -0500
+Subject: [PATCH 016/179] Update setup command
+
+---
+ kernel_options | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel_options b/kernel_options
+index aecf4297b645..6bebbc9f20b9 100644
+--- a/kernel_options
++++ b/kernel_options
+@@ -49,4 +49,4 @@ CONFIG_VIRTIO_NET=y
+ CONFIG_ISO9660_FS=m
+ CONFIG_EXT4_FS=y
+ 
+-j machine setup --class c6420-exp -f /tmp/machines --  "setup00000 {MACHINE} bijan --centos7 --clone_wkspc --firewall --host_bmks --host_dep --resize_root --swap sdb --secret {TOKEN} --spec_2017 /p/multifacet/infrastructure/spec2017.iso --spec_xz_input /p/scail/users/bijan/xz_input.tar.xz" "setup00003 {MACHINE} bijan dev --https https://github.com/BijanT/linux-file-only-mem --username BijanT --secret {TOKEN} +CONFIG_TRANSPARENT_HUGEPAGE +CONFIG_MM_ECON -CONFIG_PAGE_TABLE_ISOLATION -CONFIG_RETPOLINE +CONFIG_GDB_SCRIPTS +CONFIG_FRAME_POINTERS +CONFIG_IKHEADERS +CONFIG_SLAB_FREELIST_RANDOM +CONFIG_SHUFFLE_PAGE_ALLOCATOR +CONFIG_FS_DAX +CONFIG_DAX +CONFIG_BLK_DEV_RAM +CONFIG_FILE_ONLY_MEM"
++./target/debug/j machine setup --class test -f /tmp/machines --  "setup00000 {MACHINE} bijan --centos7 --clone_wkspc --firewall --host_bmks --host_dep --resize_root --swap sdb --secret {TOKEN} --spec_2017 /p/multifacet/infrastructure/spec2017.iso --spec_xz_input /p/scail/users/bijan/xz_input.tar.xz" "setup00003 {MACHINE} bijan dev --https github.com/BijanT/linux-file-only-mem --username BijanT --secret {TOKEN} +CONFIG_TRANSPARENT_HUGEPAGE +CONFIG_MM_ECON -CONFIG_PAGE_TABLE_ISOLATION -CONFIG_RETPOLINE +CONFIG_GDB_SCRIPTS +CONFIG_FRAME_POINTERS +CONFIG_IKHEADERS +CONFIG_SLAB_FREELIST_RANDOM +CONFIG_SHUFFLE_PAGE_ALLOCATOR +CONFIG_FS_DAX +CONFIG_DAX +CONFIG_BLK_DEV_RAM +CONFIG_FILE_ONLY_MEM"
+-- 
+2.49.0
+

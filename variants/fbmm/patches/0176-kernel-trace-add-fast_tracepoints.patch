@@ -1,0 +1,145 @@
+From 6ccd9f572ad5df2031539d304838c059f3c77aba Mon Sep 17 00:00:00 2001
+From: beviu <contact@beviu.com>
+Date: Mon, 12 May 2025 19:08:52 +0200
+Subject: [PATCH 176/179] kernel/trace: add fast_tracepoints
+
+Add the fast_tracepoint macro for latency sensitive trace points using
+the TSC. The trace points are enabled with CONFIG_FAST_TRACEPOINTS, and
+can be read from /proc/sys/debug/fast-tracepoints.
+---
+ arch/x86/include/asm/msr.h | 14 ++++++++++++++
+ include/trace/fast.h       | 27 +++++++++++++++++++++++++++
+ kernel/trace/Kconfig       |  5 +++++
+ kernel/trace/Makefile      |  1 +
+ kernel/trace/fast.c        | 32 ++++++++++++++++++++++++++++++++
+ 5 files changed, 79 insertions(+)
+ create mode 100644 include/trace/fast.h
+ create mode 100644 kernel/trace/fast.c
+
+diff --git a/arch/x86/include/asm/msr.h b/arch/x86/include/asm/msr.h
+index 65ec1965cd28..f4cd921506ac 100644
+--- a/arch/x86/include/asm/msr.h
++++ b/arch/x86/include/asm/msr.h
+@@ -222,6 +222,20 @@ static __always_inline unsigned long long rdtsc_ordered(void)
+ 	return EAX_EDX_VAL(val, low, high);
+ }
+ 
++static __always_inline unsigned long long rdtsc_serialize(void)
++{
++	DECLARE_ARGS(val, low, high);
++
++	asm volatile(ALTERNATIVE_2("mfence; rdtsc; lfence",
++				   "mfence; lfence; rdtsc; lfence", X86_FEATURE_LFENCE_RDTSC,
++				   "mfence; rdtscp; lfence", X86_FEATURE_RDTSCP)
++			: EAX_EDX_RET(val, low, high)
++			:: "ecx",   /* RDTSCP clobbers ECX with MSR_TSC_AUX. */
++			   "memory" /* Compiler barrier. */);
++
++	return EAX_EDX_VAL(val, low, high);
++}
++
+ static inline unsigned long long native_read_pmc(int counter)
+ {
+ 	DECLARE_ARGS(val, low, high);
+diff --git a/include/trace/fast.h b/include/trace/fast.h
+new file mode 100644
+index 000000000000..20866a45bbf0
+--- /dev/null
++++ b/include/trace/fast.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _TRACE_FAST_H
++#define _TRACE_FAST_H
++
++#ifdef CONFIG_FAST_TRACEPOINTS
++
++#include <linux/compiler.h>
++#include <linux/types.h>
++
++#include <asm/msr.h>
++
++#define ENUMERATE_FAST_TRACEPOINTS(x)
++
++#define DECLARE_FAST_TRACEPOINT(name) extern u64 fast_tracepoint_##name;
++ENUMERATE_FAST_TRACEPOINTS(DECLARE_FAST_TRACEPOINT)
++#undef DECLARE_FAST_TRACEPOINT
++
++#define fast_tracepoint(tracepoint_name) \
++	fast_tracepoint_##tracepoint_name = rdtsc_serialize()
++
++#else
++
++#define fast_tracepoint(tracepoint_name)
++
++#endif /* CONFIG_FAST_TRACEPOINTS */
++
++#endif /* _TRACE_FAST_H */
+diff --git a/kernel/trace/Kconfig b/kernel/trace/Kconfig
+index d7043043f59c..3e622704f8f5 100644
+--- a/kernel/trace/Kconfig
++++ b/kernel/trace/Kconfig
+@@ -491,6 +491,11 @@ config MMIOTRACE
+ 	  See Documentation/trace/mmiotrace.rst.
+ 	  If you are not helping to develop drivers, say N.
+ 
++config FAST_TRACEPOINTS
++	depends on X86_64
++	bool "Fast tracepoints"
++	default n
++
+ config ENABLE_DEFAULT_TRACERS
+ 	bool "Trace process context switches and events"
+ 	depends on !GENERIC_TRACER
+diff --git a/kernel/trace/Makefile b/kernel/trace/Makefile
+index c6651e16b557..9256a0fe6eba 100644
+--- a/kernel/trace/Makefile
++++ b/kernel/trace/Makefile
+@@ -104,6 +104,7 @@ obj-$(CONFIG_BOOTTIME_TRACING) += trace_boot.o
+ obj-$(CONFIG_FTRACE_RECORD_RECURSION) += trace_recursion_record.o
+ obj-$(CONFIG_FPROBE) += fprobe.o
+ obj-$(CONFIG_RETHOOK) += rethook.o
++obj-$(CONFIG_FAST_TRACEPOINTS) += fast.o
+ 
+ obj-$(CONFIG_TRACEPOINT_BENCHMARK) += trace_benchmark.o
+ obj-$(CONFIG_RV) += rv/
+diff --git a/kernel/trace/fast.c b/kernel/trace/fast.c
+new file mode 100644
+index 000000000000..b11ac0e05465
+--- /dev/null
++++ b/kernel/trace/fast.c
+@@ -0,0 +1,32 @@
++#include <linux/init.h>
++#include <linux/sched.h>
++#include <linux/sysctl.h>
++
++#include <trace/fast.h>
++
++#define DEFINE_FAST_TRACEPOINT(name) u64 fast_tracepoint_##name;
++ENUMERATE_FAST_TRACEPOINTS(DEFINE_FAST_TRACEPOINT)
++#undef DEFINE_FAST_TRACEPOINT
++
++static struct ctl_table timestamp_ctls[] = {
++#define FAST_TRACEPOINT_CTL(name)				    \
++	{							    \
++		.procname = #name,				    \
++		.data = &fast_tracepoint_##name,		    \
++		.maxlen = sizeof(fast_tracepoint_##name),	    \
++		.mode = 0444,					    \
++		.proc_handler = proc_doulongvec_minmax,		    \
++	},
++	ENUMERATE_FAST_TRACEPOINTS(FAST_TRACEPOINT_CTL)
++	{ },
++#undef FAST_TRACEPOINT_CTL
++};
++
++static int __init fast_tracepoints_init(void)
++{
++	register_sysctl("debug/fast-tracepoints", timestamp_ctls);
++
++	return 0;
++}
++
++early_initcall(fast_tracepoints_init)
+-- 
+2.49.0
+

@@ -1,0 +1,25 @@
+From d6c73626b3c58f884471f17b25a813199ce28789 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Fri, 14 Oct 2022 14:44:11 -0500
+Subject: [PATCH 058/179] FOMTierFS: Actually clear the pages
+
+---
+ FOMTierFS/fs.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/FOMTierFS/fs.c b/FOMTierFS/fs.c
+index 5c7abc3279b7..efee71adbea2 100644
+--- a/FOMTierFS/fs.c
++++ b/FOMTierFS/fs.c
+@@ -63,6 +63,8 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct fomtierfs_sb_info *sbi)
+     list_del(&page->list);
+     prim->free_pages--;
+ 
++    clear_page(prim->virt_addr + (page->page_num << PAGE_SHIFT));
++
+     return page;
+ }
+ 
+-- 
+2.49.0
+

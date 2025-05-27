@@ -1,0 +1,24 @@
+From dd572565de9c1197e3343c98f75b8988ef99e326 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Sun, 5 Nov 2023 12:09:54 -0600
+Subject: [PATCH 121/179] Add difference of tlb misses and range tlb hits
+
+---
+ kernel/exit.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 5f67d349df19..f224db3b1771 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -847,6 +847,7 @@ void __noreturn do_exit(long code)
+ 			printk("DTLB miss for 4KB page detected %lu\n",current->mm->total_dtlb_4k_misses);
+ 			printk("DTLB miss for hugepage detected %lu\n",current->mm->total_dtlb_hugetlb_misses);
+ 			printk("Range TLB hit detected %lu\n", current->mm->total_range_tlb_hits);
++			printk("Total TLB misses with RMM %lu\n", current->mm->total_dtlb_misses - current->mm->total_range_tlb_hits);
+ 			printk("===================================\n");
+ 		}
+ 	}
+-- 
+2.49.0
+

@@ -1,0 +1,25 @@
+From 5f499bebc939e5e286d7fe9d8959e2e5a7960f05 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Fri, 12 Jan 2024 14:27:35 -0600
+Subject: [PATCH 148/179] BasicMMFS: Typo fix
+
+---
+ BasicMMFS/basic.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/BasicMMFS/basic.c b/BasicMMFS/basic.c
+index 9390d9116bfd..c8a592eb1ed9 100644
+--- a/BasicMMFS/basic.c
++++ b/BasicMMFS/basic.c
+@@ -78,7 +78,7 @@ void basicmmfs_return_page(struct page *page, struct basicmmfs_sb_info *sbi)
+     // that seems to have been handled by the unmapping code?
+ 
+     // Add the page back to the free list
+-    list_add_tail(&page->lru, &sbi->active_list);
++    list_add_tail(&page->lru, &sbi->free_list);
+     sbi->free_pages++;
+ 
+     spin_unlock(&sbi->lock);
+-- 
+2.49.0
+

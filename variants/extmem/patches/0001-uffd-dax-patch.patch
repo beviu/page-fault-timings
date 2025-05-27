@@ -1,0 +1,1261 @@
+From 34ff56985cf469eefff708678db4938a43151c17 Mon Sep 17 00:00:00 2001
+From: SepehrDV2 <sepehr.jalalian.edu@gmail.com>
+Date: Sat, 29 Jul 2023 20:03:04 -0700
+Subject: [PATCH 01/14] uffd dax patch
+
+---
+ arch/x86/mm/fault.c              |  22 +-
+ arch/x86/mm/init.c               |  48 ++--
+ drivers/char/mem.c               |  21 +-
+ drivers/dax/device.c             |  48 +++-
+ fs/userfaultfd.c                 | 377 ++++++++++++++++++++++++++++++-
+ include/linux/userfaultfd_k.h    |   6 +
+ include/uapi/linux/userfaultfd.h |  76 ++++++-
+ kernel/events/core.c             |   4 +-
+ mm/memory.c                      |   7 +
+ mm/userfaultfd.c                 | 335 +++++++++++++++++++++++++++
+ 10 files changed, 886 insertions(+), 58 deletions(-)
+
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 31afd82b9524..eb9a7d10928d 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -289,7 +289,8 @@ static bool low_pfn(unsigned long pfn)
+ 	return pfn < max_low_pfn;
+ }
+ 
+-static void dump_pagetable(unsigned long address)
++//static void dump_pagetable(unsigned long address)
++void dump_pagetable(unsigned long address)
+ {
+ 	pgd_t *base = __va(read_cr3_pa());
+ 	pgd_t *pgd = &base[pgd_index(address)];
+@@ -345,7 +346,8 @@ static int bad_address(void *p)
+ 	return get_kernel_nofault(dummy, (unsigned long *)p);
+ }
+ 
+-static void dump_pagetable(unsigned long address)
++//static void dump_pagetable(unsigned long address)
++void dump_pagetable(unsigned long address)
+ {
+ 	pgd_t *base = __va(read_cr3_pa());
+ 	pgd_t *pgd = base + pgd_index(address);
+@@ -357,7 +359,8 @@ static void dump_pagetable(unsigned long address)
+ 	if (bad_address(pgd))
+ 		goto bad;
+ 
+-	pr_info("PGD %lx ", pgd_val(*pgd));
++	//pr_info("PGD %lx ", pgd_val(*pgd));
++	pr_info("PGD %016lx ", pgd_val(*pgd));
+ 
+ 	if (!pgd_present(*pgd))
+ 		goto out;
+@@ -366,7 +369,8 @@ static void dump_pagetable(unsigned long address)
+ 	if (bad_address(p4d))
+ 		goto bad;
+ 
+-	pr_cont("P4D %lx ", p4d_val(*p4d));
++	//pr_cont("P4D %lx ", p4d_val(*p4d));
++	pr_cont("P4D %016lx ", p4d_val(*p4d));
+ 	if (!p4d_present(*p4d) || p4d_large(*p4d))
+ 		goto out;
+ 
+@@ -374,7 +378,8 @@ static void dump_pagetable(unsigned long address)
+ 	if (bad_address(pud))
+ 		goto bad;
+ 
+-	pr_cont("PUD %lx ", pud_val(*pud));
++	//pr_cont("PUD %lx ", pud_val(*pud));
++	pr_cont("PUD %016lx ", pud_val(*pud));
+ 	if (!pud_present(*pud) || pud_large(*pud))
+ 		goto out;
+ 
+@@ -382,7 +387,8 @@ static void dump_pagetable(unsigned long address)
+ 	if (bad_address(pmd))
+ 		goto bad;
+ 
+-	pr_cont("PMD %lx ", pmd_val(*pmd));
++	//pr_cont("PMD %lx ", pmd_val(*pmd));
++	pr_cont("PMD %016lx ", pmd_val(*pmd));
+ 	if (!pmd_present(*pmd) || pmd_large(*pmd))
+ 		goto out;
+ 
+@@ -390,13 +396,15 @@ static void dump_pagetable(unsigned long address)
+ 	if (bad_address(pte))
+ 		goto bad;
+ 
+-	pr_cont("PTE %lx", pte_val(*pte));
++	//pr_cont("PTE %lx", pte_val(*pte));
++	pr_cont("PTE %016lx", pte_val(*pte));
+ out:
+ 	pr_cont("\n");
+ 	return;
+ bad:
+ 	pr_info("BAD\n");
+ }
++EXPORT_SYMBOL(dump_pagetable);
+ 
+ #endif /* CONFIG_X86_64 */
+ 
+diff --git a/arch/x86/mm/init.c b/arch/x86/mm/init.c
+index 1110f6dda352..d027e01c3eb7 100644
+--- a/arch/x86/mm/init.c
++++ b/arch/x86/mm/init.c
+@@ -867,30 +867,30 @@ void __init poking_init(void)
+  */
+ int devmem_is_allowed(unsigned long pagenr)
+ {
+-	if (region_intersects(PFN_PHYS(pagenr), PAGE_SIZE,
+-				IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE)
+-			!= REGION_DISJOINT) {
+-		/*
+-		 * For disallowed memory regions in the low 1MB range,
+-		 * request that the page be shown as all zeros.
+-		 */
+-		if (pagenr < 256)
+-			return 2;
+-
+-		return 0;
+-	}
+-
+-	/*
+-	 * This must follow RAM test, since System RAM is considered a
+-	 * restricted resource under CONFIG_STRICT_IOMEM.
+-	 */
+-	if (iomem_is_exclusive(pagenr << PAGE_SHIFT)) {
+-		/* Low 1MB bypasses iomem restrictions. */
+-		if (pagenr < 256)
+-			return 1;
+-
+-		return 0;
+-	}
++	// if (region_intersects(PFN_PHYS(pagenr), PAGE_SIZE,
++	// 			IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE)
++	// 		!= REGION_DISJOINT) {
++	// 	/*
++	// 	 * For disallowed memory regions in the low 1MB range,
++	// 	 * request that the page be shown as all zeros.
++	// 	 */
++	// 	if (pagenr < 256)
++	// 		return 2;
++
++	// 	return 0;
++	// }
++
++	// /*
++	//  * This must follow RAM test, since System RAM is considered a
++	//  * restricted resource under CONFIG_STRICT_IOMEM.
++	//  */
++	// if (iomem_is_exclusive(pagenr << PAGE_SHIFT)) {
++	// 	/* Low 1MB bypasses iomem restrictions. */
++	// 	if (pagenr < 256)
++	// 		return 1;
++
++	// 	return 0;
++	// }
+ 
+ 	return 1;
+ }
+diff --git a/drivers/char/mem.c b/drivers/char/mem.c
+index d8e3b547e0ae..1be64efdf699 100644
+--- a/drivers/char/mem.c
++++ b/drivers/char/mem.c
+@@ -63,20 +63,21 @@ static inline int valid_mmap_phys_addr_range(unsigned long pfn, size_t size)
+ #ifdef CONFIG_STRICT_DEVMEM
+ static inline int page_is_allowed(unsigned long pfn)
+ {
+-	return devmem_is_allowed(pfn);
++	//return devmem_is_allowed(pfn);
++	return 1;
+ }
+ static inline int range_is_allowed(unsigned long pfn, unsigned long size)
+ {
+-	u64 from = ((u64)pfn) << PAGE_SHIFT;
+-	u64 to = from + size;
+-	u64 cursor = from;
++	// u64 from = ((u64)pfn) << PAGE_SHIFT;
++	// u64 to = from + size;
++	// u64 cursor = from;
+ 
+-	while (cursor < to) {
+-		if (!devmem_is_allowed(pfn))
+-			return 0;
+-		cursor += PAGE_SIZE;
+-		pfn++;
+-	}
++	// while (cursor < to) {
++	// 	if (!devmem_is_allowed(pfn))
++	// 		return 0;
++	// 	cursor += PAGE_SIZE;
++	// 	pfn++;
++	// }
+ 	return 1;
+ }
+ #else
+diff --git a/drivers/dax/device.c b/drivers/dax/device.c
+index dd8222a42808..3fb6d0a54b9b 100644
+--- a/drivers/dax/device.c
++++ b/drivers/dax/device.c
+@@ -11,6 +11,7 @@
+ #include <linux/fs.h>
+ #include <linux/mm.h>
+ #include <linux/mman.h>
++#include <linux/userfaultfd_k.h>
+ #include "dax-private.h"
+ #include "bus.h"
+ 
+@@ -18,7 +19,7 @@ static int check_vma(struct dev_dax *dev_dax, struct vm_area_struct *vma,
+ 		const char *func)
+ {
+ 	struct device *dev = &dev_dax->dev;
+-	unsigned long mask;
++	unsigned long mask, mask2;
+ 
+ 	if (!dax_alive(dev_dax->dax_dev))
+ 		return -ENXIO;
+@@ -32,7 +33,9 @@ static int check_vma(struct dev_dax *dev_dax, struct vm_area_struct *vma,
+ 	}
+ 
+ 	mask = dev_dax->align - 1;
+-	if (vma->vm_start & mask || vma->vm_end & mask) {
++	mask2 = (unsigned int)4096 - 1;
++	if ((vma->vm_start & mask || vma->vm_end & mask) && (vma->vm_start & mask2 || vma->vm_end & mask2)) {
++	//if (vma->vm_start & mask || vma->vm_end & mask) {
+ 		dev_info_ratelimited(dev,
+ 				"%s: %s: fail, unaligned vma (%#lx - %#lx, %#lx)\n",
+ 				current->comm, func, vma->vm_start, vma->vm_end,
+@@ -79,11 +82,12 @@ static vm_fault_t __dev_dax_pte_fault(struct dev_dax *dev_dax,
+ 	struct device *dev = &dev_dax->dev;
+ 	phys_addr_t phys;
+ 	unsigned int fault_size = PAGE_SIZE;
+-
++	struct vm_area_struct *vma = vmf->vma;
++ 
+ 	if (check_vma(dev_dax, vmf->vma, __func__))
+ 		return VM_FAULT_SIGBUS;
+ 
+-	if (dev_dax->align > PAGE_SIZE) {
++	/*if (dev_dax->align > PAGE_SIZE) {
+ 		dev_dbg(dev, "alignment (%#x) > fault size (%#x)\n",
+ 			dev_dax->align, fault_size);
+ 		return VM_FAULT_SIGBUS;
+@@ -91,6 +95,12 @@ static vm_fault_t __dev_dax_pte_fault(struct dev_dax *dev_dax,
+ 
+ 	if (fault_size != dev_dax->align)
+ 		return VM_FAULT_SIGBUS;
++*/
++
++	if (vma && userfaultfd_missing(vma)) {
++		//printk("drivers/dax/device.c: __dev_dax_pte_fault: vma && userfaultfd_missing(vma)\n");
++		return handle_userfault(vmf, VM_UFFD_MISSING);
++	}
+ 
+ 	phys = dax_pgoff_to_phys(dev_dax, vmf->pgoff, PAGE_SIZE);
+ 	if (phys == -1) {
+@@ -111,7 +121,8 @@ static vm_fault_t __dev_dax_pmd_fault(struct dev_dax *dev_dax,
+ 	phys_addr_t phys;
+ 	pgoff_t pgoff;
+ 	unsigned int fault_size = PMD_SIZE;
+-
++	struct vm_area_struct *vma = vmf->vma;
++ 
+ 	if (check_vma(dev_dax, vmf->vma, __func__))
+ 		return VM_FAULT_SIGBUS;
+ 
+@@ -121,15 +132,24 @@ static vm_fault_t __dev_dax_pmd_fault(struct dev_dax *dev_dax,
+ 		return VM_FAULT_SIGBUS;
+ 	}
+ 
+-	if (fault_size < dev_dax->align)
++	if (fault_size < dev_dax->align){
+ 		return VM_FAULT_SIGBUS;
+-	else if (fault_size > dev_dax->align)
++	}
++	else if (fault_size > dev_dax->align){
+ 		return VM_FAULT_FALLBACK;
+-
++	}
+ 	/* if we are outside of the VMA */
+ 	if (pmd_addr < vmf->vma->vm_start ||
+-			(pmd_addr + PMD_SIZE) > vmf->vma->vm_end)
+-		return VM_FAULT_SIGBUS;
++			(pmd_addr + PMD_SIZE) > vmf->vma->vm_end){
++		return VM_FAULT_FALLBACK;
++		//return VM_FAULT_SIGBUS;
++		
++		}
++
++	if (vma && userfaultfd_missing(vma)) {
++		//printk("drivers/dax/device.c: __dev_dax_pmd_fault: vma && userfaultfd_missing(vm)\n");
++        return handle_userfault(vmf, VM_UFFD_MISSING);
++	}
+ 
+ 	pgoff = linear_page_index(vmf->vma, pmd_addr);
+ 	phys = dax_pgoff_to_phys(dev_dax, pgoff, PMD_SIZE);
+@@ -152,7 +172,8 @@ static vm_fault_t __dev_dax_pud_fault(struct dev_dax *dev_dax,
+ 	phys_addr_t phys;
+ 	pgoff_t pgoff;
+ 	unsigned int fault_size = PUD_SIZE;
+-
++	struct vm_area_struct *vma = vmf->vma;
++ 
+ 
+ 	if (check_vma(dev_dax, vmf->vma, __func__))
+ 		return VM_FAULT_SIGBUS;
+@@ -173,6 +194,11 @@ static vm_fault_t __dev_dax_pud_fault(struct dev_dax *dev_dax,
+ 			(pud_addr + PUD_SIZE) > vmf->vma->vm_end)
+ 		return VM_FAULT_SIGBUS;
+ 
++	if (vma && userfaultfd_missing(vma)) {
++        //printk("drivers/dax/device.c: __dev_dax_pud_fault: vma && userfaultfd_missing(vm)\n");
++		return handle_userfault(vmf, VM_UFFD_MISSING);
++	}
++
+ 	pgoff = linear_page_index(vmf->vma, pud_addr);
+ 	phys = dax_pgoff_to_phys(dev_dax, pgoff, PUD_SIZE);
+ 	if (phys == -1) {
+diff --git a/fs/userfaultfd.c b/fs/userfaultfd.c
+index 309d4884d5de..85912f18a0c6 100644
+--- a/fs/userfaultfd.c
++++ b/fs/userfaultfd.c
+@@ -97,6 +97,11 @@ struct userfaultfd_wake_range {
+ 	unsigned long len;
+ };
+ 
++struct userfaultfd_tlbflush_range {
++	unsigned long start;
++	unsigned long len;
++};
++
+ /* internal indication that UFFD_API ioctl was successfully executed */
+ #define UFFD_FEATURE_INITIALIZED		(1u << 31)
+ 
+@@ -501,8 +506,11 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
+ 	 */
+ 	set_current_state(blocking_state);
+ 	spin_unlock_irq(&ctx->fault_pending_wqh.lock);
+-
+-	if (!is_vm_hugetlb_page(vmf->vma))
++	if(vma_is_dax(vmf->vma))
++		must_wait = userfaultfd_huge_must_wait(ctx, vmf->vma,
++						       vmf->address,
++						       vmf->flags, reason);		 
++	else if (!is_vm_hugetlb_page(vmf->vma))
+ 		must_wait = userfaultfd_must_wait(ctx, vmf->address, vmf->flags,
+ 						  reason);
+ 	else
+@@ -551,6 +559,8 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
+ 	return ret;
+ }
+ 
++EXPORT_SYMBOL(handle_userfault);
++
+ static void userfaultfd_event_wait_completion(struct userfaultfd_ctx *ctx,
+ 					      struct userfaultfd_wait_queue *ewq)
+ {
+@@ -1265,7 +1275,7 @@ static inline bool vma_can_userfault(struct vm_area_struct *vma,
+ 			return false;
+ 	}
+ 
+-	return vma_is_anonymous(vma) || is_vm_hugetlb_page(vma) ||
++	return vma_is_anonymous(vma) || is_vm_hugetlb_page(vma) || vma_is_dax(vma) ||
+ 	       vma_is_shmem(vma);
+ }
+ 
+@@ -1847,6 +1857,345 @@ static int userfaultfd_writeprotect(struct userfaultfd_ctx *ctx,
+ 	return ret;
+ }
+ 
++static int userfaultfd_tlbflush(struct userfaultfd_ctx *ctx,
++	       			unsigned long arg)
++{
++	int ret;
++/*struct uffdio_range uffdio_tlbflush;
++	struct userfaultfd_tlbflush_range range;
++	const void __user *buf = (void __user *)arg;
++
++	ret = -EFAULT;
++	if (copy_from_user(&uffdio_tlbflush, buf, sizeof(uffdio_tlbflush)))
++		goto out;
++
++	ret = validate_range(ctx->mm, uffdio_tlbflush.start, uffdio_tlbflush.len);
++	if (ret)
++		goto out;
++
++	range.start = uffdio_tlbflush.start;
++	range.len = uffdio_tlbflush.len;
++
++	VM_BUG_ON(!range.len);
++*/
++	flush_tlb_mm(ctx->mm);
++	ret = 0;
++	
++out:
++	return ret;
++}
++
++static int userfaultfd_bad_address(void *p)
++{
++  unsigned long dummy;
++  return get_kernel_nofault(dummy, (unsigned long *)p);
++}
++
++static int userfaultfd_get_flag(struct userfaultfd_ctx *ctx,
++                     unsigned long arg)
++{
++  int ret1 = -1, ret2 = 0;
++  unsigned long address;
++  unsigned long flag1, flag2;
++  struct uffdio_page_flags uffdio_page_flags;
++  struct uffdio_page_flags __user *user_uffdio_page_flags;
++	pgd_t *base = __va(read_cr3_pa());
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++
++  user_uffdio_page_flags = (struct uffdio_page_flags __user *)arg;
++
++  if (copy_from_user(&uffdio_page_flags, user_uffdio_page_flags, sizeof(uffdio_page_flags))) {
++    //printk("fs/userfaultfd.c: userfaultfd_get_flag: copy_from_user failed\n");
++    goto out;
++  }
++
++  address = uffdio_page_flags.va;
++  flag1 = uffdio_page_flags.flag1;
++  flag2 = uffdio_page_flags.flag2;
++
++  pgd = base + pgd_index(address);
++	if (userfaultfd_bad_address(pgd))
++		goto bad;
++
++	if (!pgd_present(*pgd)) {
++    ret1 = 0;
++		goto out;
++  }
++
++	p4d = p4d_offset(pgd, address);
++	if (userfaultfd_bad_address(p4d))
++		goto bad;
++
++	if (!p4d_present(*p4d) || p4d_large(*p4d)) {
++    ret1 = 0;
++		goto out;
++  }
++
++	pud = pud_offset(p4d, address);
++	if (userfaultfd_bad_address(pud))
++		goto bad;
++
++	if (!pud_present(*pud) || pud_large(*pud)) {
++    ret1 = 0;
++		goto out;
++  }
++
++	pmd = pmd_offset(pud, address);
++	if (userfaultfd_bad_address(pmd))
++		goto bad;
++
++	if (!pmd_present(*pmd)) {
++    ret1 = 0;
++		goto out;
++  }
++
++  if (pmd_large(*pmd)) {
++    ret1 = pmd_flags(*pmd) & flag1;
++    ret2 = pmd_flags(*pmd) & flag2;
++    goto out;
++  }
++
++	pte = pte_offset_kernel(pmd, address);
++	if (userfaultfd_bad_address(pte))
++		goto bad;
++
++  ret1 = pte_flags(*pte) & flag1;
++  ret2 = pte_flags(*pte) & flag2;
++
++out:
++  if (put_user(ret1, &user_uffdio_page_flags->res1)) {
++    return -1;
++  }
++  if (put_user(ret2, &user_uffdio_page_flags->res2)) {
++    return -1;
++  }
++	return 0;
++bad:
++  return -1;
++}
++
++static int userfaultfd_clear_flag(struct userfaultfd_ctx *ctx,
++                                unsigned long arg)
++{
++  int ret = -1;
++  unsigned long address;
++  unsigned long flag1, flag2;
++  struct uffdio_page_flags uffdio_page_flags;
++  struct uffdio_page_flags __user *user_uffdio_page_flags;
++	pgd_t *base = __va(read_cr3_pa());
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++
++  user_uffdio_page_flags = (struct uffdio_page_flags __user *)arg;
++
++  if (copy_from_user(&uffdio_page_flags, user_uffdio_page_flags, sizeof(uffdio_page_flags))) {
++    //printk("fs/userfaultfd.c: userfaultfd_get_flag: copy_from_user failed\n");
++    goto bad;
++  }
++
++  address = uffdio_page_flags.va;
++  flag1 = uffdio_page_flags.flag1;
++  flag2 = uffdio_page_flags.flag2;
++
++  pgd = base + pgd_index(address);
++	if (userfaultfd_bad_address(pgd))
++		goto bad;
++
++	if (!pgd_present(*pgd)) {
++    ret = 0;
++		goto out;
++  }
++
++	p4d = p4d_offset(pgd, address);
++	if (userfaultfd_bad_address(p4d))
++		goto bad;
++
++	if (!p4d_present(*p4d) || p4d_large(*p4d)) {
++    ret = 0;
++		goto out;
++  }
++
++	pud = pud_offset(p4d, address);
++	if (userfaultfd_bad_address(pud))
++		goto bad;
++
++	if (!pud_present(*pud) || pud_large(*pud)) {
++    ret = 0;
++		goto out;
++  }
++
++	pmd = pmd_offset(pud, address);
++	if (userfaultfd_bad_address(pmd))
++		goto bad;
++
++	if (!pmd_present(*pmd)) {
++		ret = 0;
++    goto out;
++  }
++
++  if (pmd_large(*pmd)) {
++    *pmd = pmd_clear_flags(*pmd, flag1 | flag2);
++    ret = 1;
++    goto out;
++  }
++
++	pte = pte_offset_kernel(pmd, address);
++	if (userfaultfd_bad_address(pte))
++		goto bad;
++
++  *pte = pte_clear_flags(*pte, flag1 | flag2);
++  ret = 1;
++
++out:
++  if (put_user(ret, &user_uffdio_page_flags->res1)) {
++    return -1;
++  }
++	return 0;
++bad:
++  return -1;
++}
++
++static int userfaultfd_dma_copy(struct userfaultfd_ctx *ctx,
++                    unsigned long arg)
++{
++    __s64 ret;
++    struct uffdio_dma_copy uffdio_dma_copy;
++    struct uffdio_dma_copy __user *user_uffdio_dma_copy;
++    struct userfaultfd_wake_range range;
++    int index;
++    u64 expected_len = 0;
++
++    u64 start_ioctl, end_ioctl;
++    u64 start_copy, end_copy;
++    #ifdef DEBUG_TM
++    start_ioctl = rdtsc();
++    #endif
++
++    user_uffdio_dma_copy = (struct uffdio_dma_copy __user *) arg;
++  
++    #ifdef NO_OPT  
++    ret = -EAGAIN;
++    if (READ_ONCE(ctx->mmap_changing))
++        goto out;
++    #endif
++
++    #ifdef DEBUG_TM
++    start_copy = rdtsc();
++    #endif
++    ret = -EFAULT;
++    if (copy_from_user(&uffdio_dma_copy, user_uffdio_dma_copy,
++               /* don't copy "copy" last field */
++	       sizeof(uffdio_dma_copy)-sizeof(__s64)))
++        goto out;
++    #ifdef DEBUG_TM
++    end_copy = rdtsc();
++    #endif
++
++    u64 count = uffdio_dma_copy.count;
++ 
++    #ifdef NO_OPT 
++    for (index = 0; index < count; index++)  {
++        ret = validate_range(ctx->mm, uffdio_dma_copy.dst[index], uffdio_dma_copy.len[index]);
++        if (ret)
++            goto out;
++	    expected_len += uffdio_dma_copy.len[index];
++    }
++    #endif
++
++    /*
++     * double check for wraparound just in case. copy_from_user()
++     * will later check uffdio_copy.src + uffdio_copy.len to fit
++     * in the userland range.
++     */
++    ret = -EINVAL;
++    if (mmget_not_zero(ctx->mm)) {
++        ret = dma_mcopy_pages(ctx->mm, &uffdio_dma_copy, &ctx->mmap_changing);
++        mmput(ctx->mm);
++    } else {
++        return -ESRCH;
++    }
++    if (unlikely(put_user(ret, &user_uffdio_dma_copy->copy)))
++        return -EFAULT;
++    if (ret < 0)
++        goto out;
++    BUG_ON(!ret);
++    /* len == 0 would wake all */
++    range.len = ret;
++
++    #if 0
++    if (!(uffdio_dma_copy.mode & UFFDIO_COPY_MODE_DONTWAKE)) {
++        range.start = uffdio_dma_copy.dst;
++        wake_userfault(ctx, &range);
++    }
++    #endif
++
++    ret = 0;
++    #ifdef NO_OPT
++    ret = ((range.len == expected_len) ? 0 : -EAGAIN);
++    #endif
++out:
++    #ifdef DEBUG_TM
++    end_ioctl = rdtsc();
++    //printk("userfaultfd_dma_ioctl:%llu, user-kernel copy:%llu\n", end_ioctl - start_ioctl, end_copy - start_copy);
++    //printk("userfaultfd_dma_ioctl:%llu\n", end_ioctl - start_ioctl);
++    #endif
++    return ret;
++}
++
++// The design is only hemem case. Only one application can request/repsonse/use channels. Not consider concurrency and No lock for protection
++static int userfaultfd_dma_request_channs(struct userfaultfd_ctx *ctx,
++                     unsigned long arg)
++{
++    struct uffdio_dma_channs uffdio_dma_channs;
++    struct uffdio_dma_channs __user *user_uffdio_dma_channs;
++
++    user_uffdio_dma_channs = (struct uffdio_dma_channs __user *)arg;
++    if (copy_from_user(&uffdio_dma_channs, user_uffdio_dma_channs, sizeof(uffdio_dma_channs))) {
++        //printk("fs/userfaultfd.c: userfaultfd_dma_request_channs: copy_from_user failed\n");
++        return -1;
++    }
++
++    return dma_request_channs(&uffdio_dma_channs);
++}
++
++static int userfaultfd_dma_release_channs(struct userfaultfd_ctx *ctx,
++                     unsigned long arg)
++{
++    return dma_release_channs();
++}
++
++
++static int userfaultfd_cr3(struct userfaultfd_ctx *ctx,
++              unsigned long arg)
++{
++  int ret;
++  struct uffdio_cr3 uffdio_cr3;
++  struct uffdio_cr3 __user *user_uffdio_cr3;
++
++  user_uffdio_cr3 = (struct uffdio_cr3 __user *)arg;
++
++  ret = -EFAULT;
++  if (copy_from_user(&uffdio_cr3, user_uffdio_cr3, sizeof(uffdio_cr3)))
++    goto out;
++
++  if (put_user(read_cr3_pa(), &user_uffdio_cr3->cr3)) {
++    ret = -EFAULT;
++    goto out;
++  }
++
++  ret = 0;
++
++out:
++  return ret;
++}
++
+ static int userfaultfd_continue(struct userfaultfd_ctx *ctx, unsigned long arg)
+ {
+ 	__s64 ret;
+@@ -2009,6 +2358,28 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
+ 	case UFFDIO_CONTINUE:
+ 		ret = userfaultfd_continue(ctx, arg);
+ 		break;
++	case UFFDIO_TLBFLUSH:
++		ret = userfaultfd_tlbflush(ctx, arg);
++		break;
++  	case UFFDIO_CR3:
++    	ret = userfaultfd_cr3(ctx, arg);
++    	break;
++  	case UFFDIO_GET_FLAG:
++    	ret = userfaultfd_get_flag(ctx, arg);
++    	break;
++  	case UFFDIO_CLEAR_FLAG:
++    	ret = userfaultfd_clear_flag(ctx, arg);
++    	break;
++    case UFFDIO_DMA_COPY:
++		ret = userfaultfd_dma_copy(ctx, arg);
++		break;
++    case UFFDIO_DMA_REQUEST_CHANNS:
++        ret = userfaultfd_dma_request_channs(ctx, arg);
++        break;
++    case UFFDIO_DMA_RELEASE_CHANNS:
++        ret = userfaultfd_dma_release_channs(ctx, arg);
++        break;
++
+ 	}
+ 	return ret;
+ }
+diff --git a/include/linux/userfaultfd_k.h b/include/linux/userfaultfd_k.h
+index 33cea484d1ad..fcfe31337593 100644
+--- a/include/linux/userfaultfd_k.h
++++ b/include/linux/userfaultfd_k.h
+@@ -71,6 +71,12 @@ extern int mwriteprotect_range(struct mm_struct *dst_mm,
+ 			       unsigned long start, unsigned long len,
+ 			       bool enable_wp, atomic_t *mmap_changing);
+ 
++extern ssize_t dma_mcopy_pages(struct mm_struct *dst_mm,
++				struct uffdio_dma_copy *uufdio_dma_copy,
++			    	bool *mmap_changing);
++extern int dma_request_channs(struct uffdio_dma_channs *uffdio_dma_channs);
++extern int dma_release_channs(void);
++
+ /* mm helpers */
+ static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
+ 					struct vm_userfaultfd_ctx vm_ctx)
+diff --git a/include/uapi/linux/userfaultfd.h b/include/uapi/linux/userfaultfd.h
+index 05b31d60acf6..0878d1455117 100644
+--- a/include/uapi/linux/userfaultfd.h
++++ b/include/uapi/linux/userfaultfd.h
+@@ -46,7 +46,15 @@
+ #define UFFD_API_RANGE_IOCTLS_BASIC		\
+ 	((__u64)1 << _UFFDIO_WAKE |		\
+ 	 (__u64)1 << _UFFDIO_COPY |		\
+-	 (__u64)1 << _UFFDIO_CONTINUE)
++	 (__u64)1 << _UFFDIO_CONTINUE) |
++	 (__u64)1 << _UFFDIO_COPY |		\
++	 (__u64)1 << _UFFDIO_TLBFLUSH | \
++   (__u64)1 << _UFFDIO_CR3      | \
++   (__u64)1 << _UFFDIO_GET_FLAG | \
++   (__u64)1 << _UFFDIO_CLEAR_FLAG | \
++   (__u64)1 << _UFFDIO_DMA_COPY | \
++   (__u64)1 << _UFFDIO_DMA_REQUEST_CHANNS | \
++   (__u64)1 << _UFFDIO_DMA_RELEASE_CHANNS)
+ 
+ /*
+  * Valid ioctl command number range with this API is from 0x00 to
+@@ -64,6 +72,13 @@
+ #define _UFFDIO_WRITEPROTECT		(0x06)
+ #define _UFFDIO_CONTINUE		(0x07)
+ #define _UFFDIO_API			(0x3F)
++#define _UFFDIO_TLBFLUSH		(0x08)
++#define _UFFDIO_CR3        (0x0a)
++#define _UFFDIO_GET_FLAG  (0x0b)
++#define _UFFDIO_CLEAR_FLAG  (0x0c)
++#define _UFFDIO_DMA_COPY  (0x0d)
++#define _UFFDIO_DMA_REQUEST_CHANNS  (0x0e)
++#define _UFFDIO_DMA_RELEASE_CHANNS  (0x0f)
+ 
+ /* userfaultfd ioctl ids */
+ #define UFFDIO 0xAA
+@@ -83,6 +98,20 @@
+ 				      struct uffdio_writeprotect)
+ #define UFFDIO_CONTINUE		_IOWR(UFFDIO, _UFFDIO_CONTINUE,	\
+ 				      struct uffdio_continue)
++#define UFFDIO_TLBFLUSH		_IOR(UFFDIO, _UFFDIO_TLBFLUSH,	\
++				      struct uffdio_range)
++#define UFFDIO_CR3       _IOR(UFFDIO, _UFFDIO_CR3,      \
++              struct uffdio_cr3)
++#define UFFDIO_GET_FLAG   _IOWR(UFFDIO, _UFFDIO_GET_FLAG, \
++              struct uffdio_page_flags)
++#define UFFDIO_CLEAR_FLAG   _IOWR(UFFDIO, _UFFDIO_CLEAR_FLAG, \
++              struct uffdio_page_flags)
++#define UFFDIO_DMA_COPY		_IOWR(UFFDIO, _UFFDIO_DMA_COPY,	\
++				      struct uffdio_dma_copy)
++#define UFFDIO_DMA_REQUEST_CHANNS		_IOWR(UFFDIO, _UFFDIO_DMA_REQUEST_CHANNS,	\
++				      struct uffdio_dma_channs)
++#define UFFDIO_DMA_RELEASE_CHANNS		_IOWR(UFFDIO, _UFFDIO_DMA_RELEASE_CHANNS, \
++                       struct uffdio_dma_channs)
+ 
+ /* read() structure */
+ struct uffd_msg {
+@@ -290,6 +319,51 @@ struct uffdio_continue {
+ 	__s64 mapped;
+ };
+ 
++struct uffdio_cr3 {
++  //struct uffdio_range range;
++  __u64 cr3;       // base page table ptr
++};
++
++struct uffdio_page_flags {
++  __u64 va;     // virtual address
++  __u64 flag1;  // the first flag of interest
++  __u64 flag2;  // the second flag of interest
++  __u64 res1;   // result of operation (flag1 value if get, success/fail if set)
++  __u64 res2;   // result of operation (flag2 value)
++};
++
++#define DMA_BATCH 32
++#define MAX_DMA_CHANS 16
++//#define DEBUG_TM
++struct uffdio_dma_copy {
++    __u64 dst[DMA_BATCH];
++    __u64 src[DMA_BATCH];
++    __u64 len[DMA_BATCH];
++    __u64 count;
++
++    /*
++     * There will be a wrprotection flag later that allows to map
++     * pages wrprotected on the fly. And such a flag will be
++     * available if the wrprotection ioctl are implemented for the
++     * range according to the uffdio_register.ioctls.
++     */
++#define UFFDIO_COPY_MODE_DONTWAKE       ((__u64)1<<0)
++    __u64 mode;
++
++    /*
++     * "copy" is written by the ioctl and must be at the end: the
++     * copy_from_user will not read the last 8 bytes.
++     */
++    __s64 copy;
++};
++
++struct uffdio_dma_channs {
++    __u32 num_channs;
++    __u32 size_per_dma_request;
++};
++
++
++
+ /*
+  * Flags for the userfaultfd(2) system call itself.
+  */
+diff --git a/kernel/events/core.c b/kernel/events/core.c
+index 520a890a2a6f..d4732c260d40 100644
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -6403,8 +6403,8 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
+ 	 * create a performance issue due to all children writing to the
+ 	 * same rb.
+ 	 */
+-	if (event->cpu == -1 && event->attr.inherit)
+-		return -EINVAL;
++	//if (event->cpu == -1 && event->attr.inherit)
++	//	return -EINVAL;
+ 
+ 	if (!(vma->vm_flags & VM_SHARED))
+ 		return -EINVAL;
+diff --git a/mm/memory.c b/mm/memory.c
+index 4998b4c49052..38e196361eac 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -4531,6 +4531,13 @@ static inline vm_fault_t wp_huge_pmd(struct vm_fault *vmf)
+ 			return handle_userfault(vmf, VM_UFFD_WP);
+ 		return do_huge_pmd_wp_page(vmf);
+ 	}
++
++	if (vma_is_dax(vmf->vma)) {
++		if (userfaultfd_huge_pmd_wp(vmf->vma, orig_pmd)) {
++			return handle_userfault(vmf, VM_UFFD_WP);
++		}
++	}
++
+ 	if (vmf->vma->vm_ops->huge_fault) {
+ 		vm_fault_t ret = vmf->vma->vm_ops->huge_fault(vmf, PE_SIZE_PMD);
+ 
+diff --git a/mm/userfaultfd.c b/mm/userfaultfd.c
+index 98a9d0ef2d91..5e8493d19dbf 100644
+--- a/mm/userfaultfd.c
++++ b/mm/userfaultfd.c
+@@ -16,7 +16,34 @@
+ #include <linux/hugetlb.h>
+ #include <linux/shmem_fs.h>
+ #include <asm/tlbflush.h>
++#include <linux/kernel.h>
++#include <linux/fs.h>
++#include <linux/device.h>
++#include <linux/cdev.h>
++#include <linux/wait.h>
++#include <linux/string.h>
++#include <linux/dma-mapping.h>
++#include <linux/slab.h>
++#include <linux/dmaengine.h>
+ #include "internal.h"
++#include <linux/delay.h>
++#include <linux/pci.h>
++#include <asm/pgtable.h>
++#include <linux/spinlock.h>
++
++static DECLARE_WAIT_QUEUE_HEAD(wq);
++//For simplicity, request/release a fixed number of channs
++struct dma_chan *chans[MAX_DMA_CHANS] = {NULL};
++#define MAX_SIZE_PER_DMA_REQUEST (2*1024*1024)
++u32 size_per_dma_request =  MAX_SIZE_PER_DMA_REQUEST;
++u32 dma_channs = 0;
++
++struct tx_dma_param {
++    spinlock_t tx_dma_lock;
++	u64 expect_count;
++	volatile u64 wakeup_count;
++};
++
+ 
+ static __always_inline
+ struct vm_area_struct *find_dst_vma(struct mm_struct *dst_mm,
+@@ -671,6 +698,303 @@ static __always_inline ssize_t __mcopy_atomic(struct mm_struct *dst_mm,
+ 	return copied ? copied : err;
+ }
+ 
++static void hemem_dma_tx_callback(void *dma_async_param)
++{
++	struct tx_dma_param *tx_dma_param = (struct tx_dma_param*)dma_async_param;
++    spin_lock(&(tx_dma_param->tx_dma_lock));
++	(tx_dma_param->wakeup_count)++;
++	if (tx_dma_param->wakeup_count < tx_dma_param->expect_count) {
++        spin_unlock(&(tx_dma_param->tx_dma_lock));
++		return;
++	}
++    spin_unlock(&(tx_dma_param->tx_dma_lock));
++	wake_up_interruptible(&wq);
++}
++
++static int bad_address(void *p)
++{
++	unsigned long dummy;
++
++	return get_kernel_nofault(dummy, (unsigned long *)p);
++}
++
++static void  page_walk(u64 address, u64* phy_addr)
++{
++
++	pgd_t *base = __va(read_cr3_pa());
++	pgd_t *pgd = base + pgd_index(address);
++        p4d_t *p4d;
++        pud_t *pud;
++        pmd_t *pmd;
++        pte_t *pte;
++	u64 page_addr;
++	u64 page_offset;
++ 	int present = 0;	
++	int write = 0;
++
++	if (bad_address(pgd))
++		goto out;
++
++	if (!pgd_present(*pgd))
++		goto out;
++
++	p4d = p4d_offset(pgd, address);
++	if (bad_address(p4d))
++		goto out;
++
++	if (!p4d_present(*p4d) || p4d_large(*p4d))
++		goto out;
++
++	pud = pud_offset(p4d, address);
++	if (bad_address(pud))
++		goto out;
++
++	if (!pud_present(*pud) || pud_large(*pud))
++		goto out;
++
++	pmd = pmd_offset(pud, address);
++	if (bad_address(pmd))
++		goto out;
++
++    if (pmd_large(*pmd)) {
++	    page_addr = pmd_val(*pmd) & 0x000FFFFFFFE00000;
++	    page_offset = address & ~HPAGE_MASK;
++    }
++    else {
++        if (!pmd_present(*pmd))
++            goto out;
++
++        pte = pte_offset_kernel(pmd, address);
++        if (bad_address(pte))
++            goto out;
++
++        present = pte_present(*pte);
++        write = pte_write(*pte);
++        
++        if (present != 1 || write == 0) {
++            printk("in page_walk, address=%llu, present=%d, write=%d\n", address, present, write); 
++        }
++
++        page_addr = pte_val(*pte) & 0x000FFFFFFFFFF000;
++        page_offset = address & ~PAGE_MASK;
++    }
++
++	*phy_addr = page_addr | page_offset;
++    return;
++
++out:
++	pr_info("BAD\n");
++}
++
++int dma_request_channs(struct uffdio_dma_channs* uffdio_dma_channs)
++{
++    struct dma_chan *chan = NULL;
++    dma_cap_mask_t mask;
++    int index;
++    int num_channs;
++
++    if (uffdio_dma_channs == NULL) {
++        return -1;
++    }
++
++    num_channs = uffdio_dma_channs->num_channs;
++    if (num_channs > MAX_DMA_CHANS) {
++        num_channs = MAX_DMA_CHANS;
++    }
++
++    size_per_dma_request = uffdio_dma_channs->size_per_dma_request;
++    if (size_per_dma_request > MAX_SIZE_PER_DMA_REQUEST) {
++        size_per_dma_request = MAX_SIZE_PER_DMA_REQUEST;
++    }
++
++    dma_cap_zero(mask);
++    dma_cap_set(DMA_MEMCPY, mask);
++    for (index = 0; index < num_channs; index++) {
++        if (chans[index]) {
++            continue;
++        }
++
++        chan = dma_request_channel(mask, NULL, NULL);
++        if (chan == NULL) {
++            printk("wei: error when dma_request_channel, index=%d, num_channs=%u\n", index, num_channs);
++            goto out;
++        }
++
++        chans[index] = chan;
++    }
++
++    dma_channs = num_channs;
++    return 0;
++out:
++    while (index >= 0) {
++        if (chans[index]) {
++            dma_release_channel(chans[index]);
++            chans[index] = NULL;
++        }
++    }
++
++    return -1;
++}
++
++int dma_release_channs(void)
++{
++    int index;
++
++    for (index = 0; index < dma_channs; index++) {
++        if (chans[index]) {
++            dma_release_channel(chans[index]);
++            chans[index] = NULL;
++        }
++    }
++
++    dma_channs = 0;
++    size_per_dma_request = MAX_SIZE_PER_DMA_REQUEST;
++    return 0;
++}
++
++static __always_inline ssize_t __dma_mcopy_pages(struct mm_struct *dst_mm,
++					      struct uffdio_dma_copy *uffdio_dma_copy,
++					      bool *mmap_changing)
++{
++	struct vm_area_struct *dst_vma;
++	ssize_t err;
++	long copied = 0;
++	bool wp_copy;
++	u64 src_start;
++	u64 dst_start;
++    u64 src_cur;
++    u64 dst_cur;
++	dma_addr_t src_phys;
++	dma_addr_t dst_phys;
++	u64 len;
++    u64 len_cur;
++	struct dma_chan *chan = NULL;
++	dma_cap_mask_t mask;
++	struct dma_async_tx_descriptor *tx = NULL;
++	dma_cookie_t dma_cookie;
++	struct dma_device *dma;
++	struct device *dev;
++	struct mm_struct *mm = current->mm;
++	int present;
++    int index = 0;
++	u64 count = 0;
++    u64 expect_count = 0;
++    static u64 dma_assign_index = 0;
++	struct tx_dma_param tx_dma_param;
++    u64 dma_len = 0;
++    u64 start, end;
++    u64 start_walk, end_walk;
++    u64 start_copy, end_copy;
++
++    #ifdef DEBUG_TM
++    start = rdtsc();
++    #endif
++	down_read(&dst_mm->mmap_sem);
++    /*
++	 * If memory mappings are changing because of non-cooperative
++	 * operation (e.g. mremap) running in parallel, bail out and
++	 * request the user to retry later
++	 */
++	err = -EAGAIN;
++	if (mmap_changing && READ_ONCE(*mmap_changing))
++		goto out_unlock;
++
++	BUG_ON(uffdio_dma_copy == NULL);
++	count = uffdio_dma_copy->count;
++    for (index = 0; index < count; index++) {
++        if (uffdio_dma_copy->len[index] % size_per_dma_request == 0) {
++            expect_count += uffdio_dma_copy->len[index] / size_per_dma_request;
++        }
++        else {
++            expect_count += uffdio_dma_copy->len[index] / size_per_dma_request + 1;
++        }
++    }
++
++	tx_dma_param.wakeup_count = 0;
++	tx_dma_param.expect_count = expect_count;
++    spin_lock_init(&(tx_dma_param.tx_dma_lock));
++        
++    for (index  = 0; index < count; index++) {
++		dst_start = uffdio_dma_copy->dst[index];
++		src_start = uffdio_dma_copy->src[index];
++		len = uffdio_dma_copy->len[index];
++
++		/*
++		 * Sanitize the command parameters:
++		 */
++		BUG_ON(dst_start & ~PAGE_MASK);
++		BUG_ON(len & ~PAGE_MASK);
++
++		/* Does the address range wrap, or is the span zero-sized? */
++		BUG_ON(src_start + len <= src_start);
++		BUG_ON(dst_start + len <= dst_start);
++
++        #ifdef DEBUG_TM
++        start_walk = rdtsc();
++        #endif
++        page_walk(src_start, &src_phys);
++        page_walk(dst_start, &dst_phys);
++        #ifdef DEBUG_TM
++        end_walk = rdtsc();
++        start_copy = rdtsc();
++        #endif
++        for (src_cur = src_start, dst_cur = dst_start, len_cur = 0; len_cur < len;) {
++            err = 0;
++		    chan = chans[dma_assign_index++ % dma_channs];
++            if (len_cur + size_per_dma_request > len) {
++                dma_len = len - len_cur; 
++            }
++            else {
++                dma_len = size_per_dma_request;
++            }
++
++            tx = dmaengine_prep_dma_memcpy(chan, dst_phys, src_phys, dma_len, DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
++            if (tx == NULL) {
++                printk("wei: error when dmaengine_prep_dma_memcpy, dma_chans=%d\n", dma_channs);
++                goto out_unlock;
++            }
++
++            tx->callback = hemem_dma_tx_callback;
++            tx->callback_param = &tx_dma_param;
++            tx->cookie = chan->cookie;
++            dma_cookie = dmaengine_submit(tx);
++            if (dma_submit_error(dma_cookie)) {
++                printk("wei: Failed to do DMA tx_submit\n");
++                goto out_unlock;
++            }
++
++            dma_async_issue_pending(chan);
++            len_cur += dma_len;
++            src_cur += dma_len;
++            dst_cur += dma_len;
++            src_phys += dma_len;
++            dst_phys += dma_len;
++        }
++	}
++
++	wait_event_interruptible(wq, tx_dma_param.wakeup_count >= tx_dma_param.expect_count);
++    #ifdef DEBUG_TM
++    end_copy = rdtsc();
++    #endif
++	for (index = 0; index < count; index++) {
++		copied += uffdio_dma_copy->len[index];
++	}
++
++out_unlock:
++	up_read(&dst_mm->mmap_sem);
++out:
++   	BUG_ON(copied < 0);
++	BUG_ON(err > 0);
++	BUG_ON(!copied && !err);
++    #ifdef DEBUG_TM
++    end = rdtsc();
++    //printk("dma_memcpy_fun: %llu, page_walk: %llu, only_dma_op:%llu\n", end - start, end_copy - start_copy, end_walk - start_walk);
++    #endif
++	return copied ? copied : err;
++}
++
++
++
+ ssize_t mcopy_atomic(struct mm_struct *dst_mm, unsigned long dst_start,
+ 		     unsigned long src_start, unsigned long len,
+ 		     atomic_t *mmap_changing, __u64 mode)
+@@ -679,6 +1003,17 @@ ssize_t mcopy_atomic(struct mm_struct *dst_mm, unsigned long dst_start,
+ 			      MCOPY_ATOMIC_NORMAL, mmap_changing, mode);
+ }
+ 
++ssize_t dma_mcopy_pages(struct mm_struct *dst_mm,
++		     struct uffdio_dma_copy *uffdio_dma_copy,
++		     bool *mmap_changing)
++{
++	return __dma_mcopy_pages(dst_mm, 
++			      uffdio_dma_copy,
++			      mmap_changing);
++}
++
++
++
+ ssize_t mfill_zeropage(struct mm_struct *dst_mm, unsigned long start,
+ 		       unsigned long len, atomic_t *mmap_changing)
+ {
+-- 
+2.49.0
+

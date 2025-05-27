@@ -1,0 +1,25 @@
+From 16ed91d5e94260a324693d485351552e687ef23a Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Mon, 6 Nov 2023 21:55:54 -0600
+Subject: [PATCH 123/179] Fix the bavail statfs entry
+
+---
+ TieredMMFS/fs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/TieredMMFS/fs.c b/TieredMMFS/fs.c
+index 89b561b96bbf..4f2a28c7eae9 100644
+--- a/TieredMMFS/fs.c
++++ b/TieredMMFS/fs.c
+@@ -1026,7 +1026,7 @@ static int tieredmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+     buf->f_type = sb->s_magic;
+     buf->f_bsize = sbi->page_size;
+     buf->f_blocks = sbi->mem[FAST_MEM].num_pages + sbi->mem[SLOW_MEM].num_pages;
+-    buf->f_bfree = buf->f_bavail = sbi->mem[FAST_MEM].free_pages + sbi->mem[SLOW_MEM].num_pages;
++    buf->f_bfree = buf->f_bavail = sbi->mem[FAST_MEM].free_pages + sbi->mem[SLOW_MEM].free_pages;
+     buf->f_files = LONG_MAX;
+     buf->f_ffree = LONG_MAX;
+     buf->f_namelen = 255;
+-- 
+2.49.0
+

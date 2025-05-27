@@ -1,0 +1,77 @@
+From 000a674291b8fb4d052685cd5b981eb6ab2170d1 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Wed, 1 Nov 2023 11:23:41 -0500
+Subject: [PATCH 120/179] Fix issue where badger trap was faulting
+
+---
+ mm/memory.c | 21 +++++++++++++--------
+ 1 file changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/mm/memory.c b/mm/memory.c
+index 17b5e8e6454b..7e589a644af6 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -4923,6 +4923,7 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	struct range_tlb_entry *tlb_entry, *tmp;
+ 	bool range_tlb_hit = false;
+ 	unsigned long ret;
++	pte_t entry = *page_table;
+ 	static unsigned int consecutive = 0;
+ 	static unsigned long prev_address = 0;
+ 
+@@ -4934,24 +4935,28 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		prev_address = address;
+ 	}
+ 
+-	if(consecutive > 1)
++	if(consecutive > 1 || !(pte_flags(entry) & _PAGE_PRESENT))
+ 	{
+-		*page_table = pte_unreserve(*page_table);
++		entry = pte_unreserve(entry);
++		set_pte_at(mm, address & PAGE_MASK, page_table, entry);
+ 		pte_unmap_unlock(page_table, ptl);
+ 		return 0;
+ 	}
+ 
+ 	if(flags & FAULT_FLAG_WRITE)
+-		*page_table = pte_mkdirty(*page_table);
++		entry = pte_mkdirty(entry);
+ 
+-	*page_table = pte_mkyoung(*page_table);
+-	*page_table = pte_unreserve(*page_table);
++	entry = pte_mkyoung(entry);
++	entry = pte_unreserve(entry);
++	set_pte_at(mm, address & PAGE_MASK, page_table, entry);
+ 
+ 	touch_page_addr = (void *)(address & PAGE_MASK);
+ 	ret = copy_from_user(&touched, (__force const void __user *)touch_page_addr, sizeof(unsigned long));
+ 
+-	if(ret)
++	if(ret) {
++		pte_unmap_unlock(page_table, ptl);
+ 		return VM_FAULT_SIGBUS;
++	}
+ 
+ 	/* Here where we do all our analysis */
+ 	current->total_dtlb_4k_misses++;
+@@ -4986,7 +4991,8 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	}
+ 	spin_unlock(&mm->range_tlb_lock);
+ 
+-	*page_table = pte_mkreserve(*page_table);
++	entry = pte_mkreserve(entry);
++	set_pte_at(mm, address & PAGE_MASK, page_table, entry);
+ 	pte_unmap_unlock(page_table, ptl);
+ 
+ 	return 0;
+@@ -5106,7 +5112,6 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+ 						 page_table, vmf->pmd, vmf->flags, vmf->ptl);
+ 		}
+ 
+-		*page_table = pte_mkreserve(*page_table);
+ 		pte_unmap_unlock(page_table, vmf->ptl);
+ 	}
+ 
+-- 
+2.49.0
+

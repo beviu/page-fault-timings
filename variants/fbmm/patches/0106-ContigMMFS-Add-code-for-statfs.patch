@@ -1,0 +1,35 @@
+From 2b7e2ad488c1da4ab797791416996a36bc0790b0 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Mon, 9 Oct 2023 15:29:17 -0500
+Subject: [PATCH 106/179] ContigMMFS: Add code for statfs
+
+---
+ ContigMMFS/contig.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/ContigMMFS/contig.c b/ContigMMFS/contig.c
+index 57c509a7f414..9b90ba966217 100644
+--- a/ContigMMFS/contig.c
++++ b/ContigMMFS/contig.c
+@@ -292,7 +292,17 @@ static const struct inode_operations contigmmfs_dir_inode_operations = {
+ 
+ static int contigmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+ {
+-    //TODO
++    struct super_block *sb = dentry->d_sb;
++    struct contigmmfs_sb_info *sbi = CMMFS_SB(sb);
++
++    buf->f_type = sb->s_magic;
++    buf->f_bsize = PAGE_SIZE;
++    buf->f_blocks = sbi->num_pages;
++    buf->f_bfree = buf->f_bavail = sbi->num_pages;
++    buf->f_files = LONG_MAX;
++    buf->f_ffree = LONG_MAX;
++    buf->f_namelen = 255;
++
+     return 0;
+ }
+ 
+-- 
+2.49.0
+

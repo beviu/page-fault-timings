@@ -1,0 +1,43 @@
+From f86568624be24eb0e528cb33bea9fd734ba231cf Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 6 Apr 2022 14:25:15 -0500
+Subject: [PATCH 036/179] Make sure follow_page_mask works in increments of
+ huge pages with FOM
+
+---
+ mm/gup.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/mm/gup.c b/mm/gup.c
+index 1e751ec22560..4afcdb2bb54c 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -664,14 +664,14 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
+ 		return no_page_table(vma, flags);
+ 	if (!pmd_present(pmdval))
+ 		return no_page_table(vma, flags);
+-	if (pmd_devmap(pmdval)) {
++	if (pmd_devmap(pmdval) && !use_file_only_mem(current->tgid)) {
+ 		ptl = pmd_lock(mm, pmd);
+ 		page = follow_devmap_pmd(vma, address, pmd, flags, &ctx->pgmap);
+ 		spin_unlock(ptl);
+ 		if (page)
+ 			return page;
+ 	}
+-	if (likely(!pmd_trans_huge(pmdval)))
++	if (likely(!pmd_trans_huge(pmdval)) && !((pmd_val(pmdval) & _PAGE_PSE) && use_file_only_mem(current->tgid)))
+ 		return follow_page_pte(vma, address, pmd, flags, &ctx->pgmap);
+ 
+ 	if (pmd_protnone(pmdval) && !gup_can_follow_protnone(flags))
+@@ -682,7 +682,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
+ 		spin_unlock(ptl);
+ 		return no_page_table(vma, flags);
+ 	}
+-	if (unlikely(!pmd_trans_huge(*pmd))) {
++	if (unlikely(!pmd_trans_huge(*pmd)) && !((pmd_val(pmdval) & _PAGE_PSE) && use_file_only_mem(current->tgid))) {
+ 		spin_unlock(ptl);
+ 		return follow_page_pte(vma, address, pmd, flags, &ctx->pgmap);
+ 	}
+-- 
+2.49.0
+

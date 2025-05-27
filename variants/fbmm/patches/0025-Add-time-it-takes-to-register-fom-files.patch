@@ -1,0 +1,68 @@
+From 4128cbd48c48de9aa7d2b84b700c480b445b00bb Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Mon, 22 Nov 2021 11:32:30 -0600
+Subject: [PATCH 025/179] Add time it takes to register fom files
+
+---
+ mm/file_only_mem.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index 0fe8420164ed..bbdf0d5279a4 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -47,6 +47,8 @@ static DECLARE_RWSEM(fom_procs_sem);
+ 
+ static ktime_t file_create_time = 0;
+ static u64 num_file_creates = 0;
++static ktime_t file_register_time = 0;
++static u64 num_file_registers = 0;
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ // struct fom_proc functions
+@@ -272,6 +274,7 @@ void fom_register_file(pid_t pid, struct file *f,
+ 	struct fom_mapping *mapping = NULL;
+ 	struct fom_file *file = NULL;
+ 	bool new_proc = false;
++	ktime_t start_time = ktime_get_ns();
+ 
+ 	down_read(&fom_procs_sem);
+ 	proc = get_fom_proc(pid);
+@@ -319,6 +322,9 @@ void fom_register_file(pid_t pid, struct file *f,
+ 		insert_new_proc(proc);
+ 	up_write(&fom_procs_sem);
+ 
++	file_register_time += ktime_get_ns() - start_time;
++	num_file_registers++;
++
+ 	return;
+ err:
+ 	if (new_proc)
+@@ -583,12 +589,22 @@ static ssize_t fom_stats_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+     u64 avg_create_time = 0;
++    u64 avg_register_time = 0;
++    ssize_t count;
++
+     if (num_file_creates != 0) {
+         avg_create_time = file_create_time / num_file_creates;
+     }
++    if (num_file_registers != 0) {
++        avg_register_time = file_register_time / num_file_registers;
++    }
++
++    count = sprintf(buf, "file create times: %lld %lld %lld\n", file_create_time,
++        num_file_creates, avg_create_time);
++    count += sprintf(&buf[count], "file register times: %lld %lld %lld\n", file_register_time,
++        num_file_registers, avg_register_time);
+ 
+-    return sprintf(buf, "%lld %lld %lld\n", file_create_time, num_file_creates,
+-		avg_create_time);
++    return count;
+ }
+ 
+ static ssize_t fom_stats_store(struct kobject *kobj,
+-- 
+2.49.0
+

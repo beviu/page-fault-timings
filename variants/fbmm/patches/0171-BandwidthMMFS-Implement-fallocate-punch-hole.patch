@@ -1,0 +1,94 @@
+From ed264bcd1e318dda2a32c7b9979f9880ff34e282 Mon Sep 17 00:00:00 2001
+From: bijan <bijan@node1.bijan-234419.superpages-pg0.wisc.cloudlab.us>
+Date: Tue, 3 Dec 2024 20:51:52 +0000
+Subject: [PATCH 171/179] BandwidthMMFS: Implement fallocate punch hole
+
+---
+ BandwidthMMFS/bandwidth.c | 30 +++++++++++++++++++++++++++++-
+ mm/filemap.c              |  1 +
+ mm/mmap.c                 |  2 +-
+ 3 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/BandwidthMMFS/bandwidth.c b/BandwidthMMFS/bandwidth.c
+index 6739cfdced29..0ba23044f6b3 100644
+--- a/BandwidthMMFS/bandwidth.c
++++ b/BandwidthMMFS/bandwidth.c
+@@ -137,7 +137,30 @@ static long bwmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t
+     struct page *page;
+     loff_t off;
+ 
+-    if (mode != 0) {
++    if (mode & FALLOC_FL_PUNCH_HOLE) {
++        for (off = offset; off < offset + len; off += PAGE_SIZE) {
++            page = mtree_erase(&inode_info->mt, off);
++            if (page) {
++                int mapcount = atomic_read(&page_folio(page)->_mapcount) + 1;
++                put_page(page);
++                sbi->num_pages--;
++
++                // I don't know if this is right, but it makes bad page
++                // cache errors go away when running merci
++                if (mapcount >= 1) {
++                    continue;
++                }
++
++                if (page->mapping) {
++                    folio_lock(page_folio(page));
++                    filemap_remove_folio(page_folio(page));
++                    folio_unlock(page_folio(page));
++                }
++            }
++        }
++
++        return 0;
++    } else if (mode != 0) {
+         return -EOPNOTSUPP;
+     }
+ 
+@@ -304,6 +327,11 @@ static void bwmmfs_free_inode(struct inode *inode)
+     mt_for_each(&inode_info->mt, page, index, ULONG_MAX) {
+         sbi->num_pages--;
+         put_page(page);
++        if (page->mapping) {
++            folio_lock(page_folio(page));
++            filemap_remove_folio(page_folio(page));
++            folio_unlock(page_folio(page));
++        }
+     }
+ 
+     mtree_destroy(&inode_info->mt);
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 5b7ad2525a98..fe2d20b778ee 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -260,6 +260,7 @@ void filemap_remove_folio(struct folio *folio)
+ 
+ 	filemap_free_folio(mapping, folio);
+ }
++EXPORT_SYMBOL_GPL(filemap_remove_folio);
+ 
+ /*
+  * page_cache_delete_batch - delete several folios from page cache
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 90161400a9eb..7de924023180 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -2525,6 +2525,7 @@ do_mas_align_munmap(struct ma_state *mas, struct vm_area_struct *vma,
+ 	__mt_destroy(&mt_detach);
+ 
+ 	validate_mm(mm);
++	fbmm_munmap(current, start, end - start);
+ 	return downgrade ? 1 : 0;
+ 
+ userfaultfd_error:
+@@ -2575,7 +2576,6 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
+ 	if (!vma)
+ 		return 0;
+ 
+-	fbmm_munmap(current, start, end - start);
+ 	return do_mas_align_munmap(mas, vma, mm, start, end, uf, downgrade);
+ }
+ 
+-- 
+2.49.0
+

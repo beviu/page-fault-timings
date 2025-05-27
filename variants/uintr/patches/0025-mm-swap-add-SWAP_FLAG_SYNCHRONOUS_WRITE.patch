@@ -1,0 +1,85 @@
+From 87d88fe7f5f34f6ced78d805e27d3814fe118f95 Mon Sep 17 00:00:00 2001
+From: beviu <contact@beviu.com>
+Date: Fri, 2 May 2025 10:20:26 +0200
+Subject: [PATCH 25/25] mm: swap: add SWAP_FLAG_SYNCHRONOUS_WRITE
+
+madvise(MADV_PAGEOUT) can be used to tell the kernel to swap out pages,
+but there is no easy way to wait for them to actually be removed from
+the swap cache.
+
+It does call swap_writepage directly which submits the write
+operation but does so asynchronously, unless the swap file has the
+SWP_SYNCHRONOUS_IO flag, and that flag is currently only set when the
+underlying block device is marked as synchronous (bdev_synchronous).
+
+Add a SWAP_FLAG_SYNCHRONOUS_WRITE flag to swapon that forces the swap
+file to use synchronous writes with SWP_SYNCHRONOUS_WRITE.
+
+SWP_SYNCHRONOUS_WRITE is a new swap info flag that makes writes to the
+swap synchronous like SWP_SYNCHRONOUS_IO. The latter could not be used
+because it also changes the way pages are read.
+
+This is still not enough for userspace to be able to wait for the
+pages to be removed from the swap cache, as the write callback
+(__end_swap_bio_write) only ends writeback against the folio, so it will
+still not be freed until the next reclaim, but this will be dealt in
+another commit.
+---
+ include/linux/swap.h | 16 +++++++++-------
+ mm/swapfile.c        |  3 +++
+ 2 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+index 43150b9bbc5c..a2e7f94fb602 100644
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -22,16 +22,17 @@ struct bio;
+ 
+ struct pagevec;
+ 
+-#define SWAP_FLAG_PREFER	0x8000	/* set if swap priority specified */
+-#define SWAP_FLAG_PRIO_MASK	0x7fff
+-#define SWAP_FLAG_PRIO_SHIFT	0
+-#define SWAP_FLAG_DISCARD	0x10000 /* enable discard for swap */
+-#define SWAP_FLAG_DISCARD_ONCE	0x20000 /* discard swap area at swapon-time */
+-#define SWAP_FLAG_DISCARD_PAGES 0x40000 /* discard page-clusters after use */
++#define SWAP_FLAG_PREFER		0x8000	/* set if swap priority specified */
++#define SWAP_FLAG_PRIO_MASK		0x7fff
++#define SWAP_FLAG_PRIO_SHIFT		0
++#define SWAP_FLAG_DISCARD		0x10000 /* enable discard for swap */
++#define SWAP_FLAG_DISCARD_ONCE		0x20000 /* discard swap area at swapon-time */
++#define SWAP_FLAG_DISCARD_PAGES		0x40000 /* discard page-clusters after use */
++#define SWAP_FLAG_SYNCHRONOUS_WRITE	0x80000 /* use synchronous writes */
+ 
+ #define SWAP_FLAGS_VALID	(SWAP_FLAG_PRIO_MASK | SWAP_FLAG_PREFER | \
+ 				 SWAP_FLAG_DISCARD | SWAP_FLAG_DISCARD_ONCE | \
+-				 SWAP_FLAG_DISCARD_PAGES)
++				 SWAP_FLAG_DISCARD_PAGES | SWAP_FLAG_SYNCHRONOUS_WRITE)
+ #define SWAP_BATCH 64
+ 
+ static inline int current_is_kswapd(void)
+@@ -207,6 +208,7 @@ enum {
+ 	SWP_PAGE_DISCARD = (1 << 10),	/* freed swap page-cluster discards */
+ 	SWP_STABLE_WRITES = (1 << 11),	/* no overwrite PG_writeback pages */
+ 	SWP_SYNCHRONOUS_IO = (1 << 12),	/* synchronous IO is efficient */
++	SWP_SYNCHRONOUS_WRITE = (1 << 13),	/* use synchronous IO in writepage */
+ 					/* add others here before... */
+ 	SWP_SCANNING	= (1 << 14),	/* refcount in scan_swap_map */
+ };
+diff --git a/mm/swapfile.c b/mm/swapfile.c
+index 1fdccd2f1422..dc65e411c579 100644
+--- a/mm/swapfile.c
++++ b/mm/swapfile.c
+@@ -3078,6 +3078,9 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
+ 	if (p->bdev && p->bdev->bd_disk->fops->rw_page)
+ 		p->flags |= SWP_SYNCHRONOUS_IO;
+ 
++	if (swap_flags & SWAP_FLAG_SYNCHRONOUS_WRITE)
++		p->flags |= SWP_SYNCHRONOUS_WRITE;
++
+ 	if (p->bdev && bdev_nonrot(p->bdev)) {
+ 		int cpu;
+ 		unsigned long ci, nr_cluster;
+-- 
+2.49.0
+

@@ -1,0 +1,26 @@
+From 2cb397239a2c3b970c11bf73f8d1a30530749191 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Fri, 28 Oct 2022 13:51:52 -0500
+Subject: [PATCH 074/179] Oops, accidentally had the demote task interval too
+ low
+
+---
+ FOMTierFS/fs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/FOMTierFS/fs.c b/FOMTierFS/fs.c
+index 2ff89f107ce6..aae8d73e7220 100644
+--- a/FOMTierFS/fs.c
++++ b/FOMTierFS/fs.c
+@@ -565,7 +565,7 @@ static int fomtierfs_demote_task(void *data)
+             fast_page = NULL;
+         }
+ 
+-        msleep_interruptible(500);
++        msleep_interruptible(5000);
+     }
+     return 0;
+ }
+-- 
+2.49.0
+

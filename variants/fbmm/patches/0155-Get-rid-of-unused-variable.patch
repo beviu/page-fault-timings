@@ -1,0 +1,24 @@
+From a6ba5bd1924c95d88c7d1988e19157fb66df65d0 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Mon, 15 Jan 2024 13:23:52 -0600
+Subject: [PATCH 155/179] Get rid of unused variable
+
+---
+ ContigMMFS/contig.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/ContigMMFS/contig.c b/ContigMMFS/contig.c
+index 75c1a61d918c..134809d88033 100644
+--- a/ContigMMFS/contig.c
++++ b/ContigMMFS/contig.c
+@@ -192,7 +192,6 @@ static long contigmmfs_fallocate(struct file *file, int mode, loff_t offset, lof
+     struct contigmmfs_inode_info *inode_info = CMMFS_I(inode);
+     struct contigmmfs_contig_alloc *region = NULL;
+     struct contigmmfs_contig_alloc *next_region = NULL;
+-    struct range_tlb_entry *tlb_entry;
+     u64 start_addr = inode_info->va_start + offset;
+     u64 end_addr = start_addr + len;
+ 
+-- 
+2.49.0
+

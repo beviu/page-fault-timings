@@ -1,0 +1,28 @@
+From b9601eef3476ad70bb72ccf01452d176d1ae61d2 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Fri, 24 Mar 2023 10:52:33 -0500
+Subject: [PATCH 092/179] Remove call to function removed in newer Linux
+ versions
+
+---
+ mm/file_based_mm.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 71fae3130fc8..ca6db4c7f71e 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -166,9 +166,7 @@ static int truncate_fbmm_file(struct file *f, unsigned long len, int flags) {
+ 			error = vfs_fallocate(f, 0, 0, len);
+ 	} else {
+ 		sb_start_write(inode->i_sb);
+-		error = locks_verify_truncate(inode, f, len);
+-		if (!error)
+-			error = security_path_truncate(&f->f_path);
++		error = security_path_truncate(&f->f_path);
+ 		if (!error)
+ 			error = do_truncate(file_mnt_user_ns(f), dentry, len,
+ 					    ATTR_MTIME | ATTR_CTIME, f);
+-- 
+2.49.0
+

@@ -1,0 +1,25 @@
+From c3e6dd81f037344d02b9f6450c682b7b3f87b29f Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Mon, 1 Apr 2024 14:00:14 -0500
+Subject: [PATCH 162/179] FBMM: add VM_FBMM flag for allocations from brk
+
+---
+ mm/mmap.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 10d195237c26..af52858d5ddf 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -268,7 +268,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
+ 
+ 		if (f && !IS_ERR(f)) {
+ 			vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
+-				| VM_SHARED | VM_MAYSHARE;
++				| VM_SHARED | VM_MAYSHARE | VM_FBMM;
+ 			mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, pgoff, NULL);
+ 			used_fbmm = true;
+ 		}
+-- 
+2.49.0
+

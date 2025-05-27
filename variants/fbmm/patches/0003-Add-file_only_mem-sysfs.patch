@@ -1,0 +1,192 @@
+From 61682bab9452abc30d80d39eff36d5a586a927fb Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 29 Sep 2021 12:38:00 -0500
+Subject: [PATCH 003/179] Add file_only_mem sysfs
+
+Located at /sys/kernel/mm/fom/
+---
+ include/linux/file_only_mem.h |  18 ++++++
+ mm/Kconfig                    |   6 ++
+ mm/Makefile                   |   1 +
+ mm/file_only_mem.c            | 118 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 143 insertions(+)
+ create mode 100644 include/linux/file_only_mem.h
+ create mode 100644 mm/file_only_mem.c
+
+diff --git a/include/linux/file_only_mem.h b/include/linux/file_only_mem.h
+new file mode 100644
+index 000000000000..cbd5c4c5cb79
+--- /dev/null
++++ b/include/linux/file_only_mem.h
+@@ -0,0 +1,18 @@
++#ifndef _FILE_ONLY_MEM_H_
++#define _FILE_ONLY_MEM_H_
++
++#include <linux/types.h>
++
++#ifdef CONFIG_FILE_ONLY_MEM
++
++bool use_file_only_mem(pid_t pid);
++
++#else //CONFIG_FILE_ONLY_MEM
++
++inline bool use_file_only_mem(pid_t pid) {
++	return false;
++}
++
++#endif //CONFIG_FILE_ONLY_MEM
++
++#endif //__FILE_ONLY_MEM_H
+diff --git a/mm/Kconfig b/mm/Kconfig
+index ff7b209dec05..c3e700d607af 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -374,6 +374,12 @@ config MMAP_ALLOW_UNINITIALIZED
+ 
+ 	  See Documentation/admin-guide/mm/nommu-mmap.rst for more information.
+ 
++config FILE_ONLY_MEM
++	bool "File Only Memory"
++	depends on FS_DAX
++	help
++	  This option enables file only memory
++
+ config SELECT_MEMORY_MODEL
+ 	def_bool y
+ 	depends on ARCH_SELECT_MEMORY_MODEL
+diff --git a/mm/Makefile b/mm/Makefile
+index 8e105e5b3e29..b611e37fd12a 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -138,3 +138,4 @@ obj-$(CONFIG_IO_MAPPING) += io-mapping.o
+ obj-$(CONFIG_HAVE_BOOTMEM_INFO_NODE) += bootmem_info.o
+ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
+ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
++obj-$(CONFIG_FILE_ONLY_MEM) += file_only_mem.o
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+new file mode 100644
+index 000000000000..89d7630b5693
+--- /dev/null
++++ b/mm/file_only_mem.c
+@@ -0,0 +1,118 @@
++#include <linux/types.h>
++#include <linux/file_only_mem.h>
++#include <linux/sysfs.h>
++#include <linux/kobject.h>
++
++enum file_only_mem_state {
++	FOM_OFF = 0,
++	FOM_SINGLE_PROC = 1,
++	FOM_ALL = 2
++};
++
++enum file_only_mem_state fom_state = FOM_OFF;
++pid_t fom_proc = 0;
++
++bool use_file_only_mem(pid_t pid) {
++	if (fom_state == FOM_OFF) {
++		return false;
++	} if (fom_state == FOM_SINGLE_PROC) {
++		return pid == fom_proc;
++	} else if (fom_state == FOM_ALL) {
++		return true;
++	}
++
++	// Should never reach here
++	return false;
++}
++
++///////////////////////////////////////////////////////////////////////////////
++// sysfs files
++static ssize_t fom_state_show(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", fom_state);
++}
++
++static ssize_t fom_state_store(struct kobject *kobj,
++		struct kobj_attribute *attr,
++		const char *buf, size_t count)
++{
++	int state;
++	int ret;
++
++	ret = kstrtoint(buf, 0, &state);
++
++	if (ret != 0) {
++		fom_state = FOM_OFF;
++		return ret;
++	} else if (state >= FOM_OFF && state <= FOM_ALL) {
++		fom_state = state;
++		return count;
++	} else {
++		fom_state = FOM_OFF;
++		return -EINVAL;
++	}
++}
++static struct kobj_attribute fom_state_attribute =
++__ATTR(state, 0644, fom_state_show, fom_state_store);
++
++static ssize_t fom_pid_show(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", fom_proc);
++}
++
++static ssize_t fom_pid_store(struct kobject *kobj,
++		struct kobj_attribute *attr,
++		const char *buf, size_t count)
++{
++	pid_t pid;
++	int ret;
++
++	ret = kstrtoint(buf, 0, &pid);
++
++	if (ret != 0) {
++		fom_proc = 0;
++		return ret;
++	}
++
++	fom_proc = pid;
++
++	return count;
++}
++static struct kobj_attribute fom_pid_attribute =
++__ATTR(pid, 0644, fom_pid_show, fom_pid_store);
++
++static struct attribute *file_only_mem_attr[] = {
++	&fom_state_attribute.attr,
++	&fom_pid_attribute.attr,
++	NULL,
++};
++
++static const struct attribute_group file_only_mem_attr_group = {
++	.attrs = file_only_mem_attr,
++};
++
++///////////////////////////////////////////////////////////////////////////////
++// Init
++static int __init file_only_memory_init(void)
++{
++	struct kobject *fom_kobj;
++	int err;
++
++	fom_kobj = kobject_create_and_add("fom", mm_kobj);
++	if (unlikely(!fom_kobj)) {
++		pr_err("failed to create the file only memory kobject\n");
++		return -ENOMEM;
++	}
++
++	err = sysfs_create_group(fom_kobj, &file_only_mem_attr_group);
++	if (err) {
++		pr_err("failed to register the file only memory group\n");
++		kobject_put(fom_kobj);
++		return err;
++	}
++
++	return 0;
++}
++subsys_initcall(file_only_memory_init);
+-- 
+2.49.0
+

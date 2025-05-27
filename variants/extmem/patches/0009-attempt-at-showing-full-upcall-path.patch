@@ -1,0 +1,76 @@
+From 97d911adeb64bd64f87868be145e96239b779212 Mon Sep 17 00:00:00 2001
+From: SepehrDV2 <sepehr.jalalian.edu@gmail.com>
+Date: Sun, 7 Jan 2024 13:20:18 -0800
+Subject: [PATCH 09/14] attempt at showing full upcall path
+
+---
+ arch/x86/kernel/signal.c |  4 +++-
+ include/linux/signal.h   |  2 ++
+ kernel/signal.c          | 23 +++++++++++++++++++++++
+ 3 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kernel/signal.c b/arch/x86/kernel/signal.c
+index bf10340a9b71..c25870a051ed 100644
+--- a/arch/x86/kernel/signal.c
++++ b/arch/x86/kernel/signal.c
+@@ -669,7 +669,9 @@ SYSCALL_DEFINE0(rt_sigreturn)
+ 	if (__get_user(uc_flags, &frame->uc.uc_flags))
+ 		goto badframe;
+ 
+-	set_current_blocked(&set);
++	//set_current_blocked(&set);
++	// what if?
++	set_current_blocked_fastpath(&set);
+ 
+ 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, uc_flags))
+ 		goto badframe;
+diff --git a/include/linux/signal.h b/include/linux/signal.h
+index 3f96a6374e4f..9fe8489307ab 100644
+--- a/include/linux/signal.h
++++ b/include/linux/signal.h
+@@ -287,6 +287,8 @@ extern int __group_send_sig_info(int, struct kernel_siginfo *, struct task_struc
+ extern int sigprocmask(int, sigset_t *, sigset_t *);
+ extern void set_current_blocked(sigset_t *);
+ extern void __set_current_blocked(const sigset_t *);
++extern void set_current_blocked_fastpath(sigset_t *);
++extern void __set_current_blocked_fastpath(const sigset_t *);
+ extern int show_unhandled_signals;
+ 
+ extern bool get_signal(struct ksignal *ksig);
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 51cb64454414..ff0d19755894 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -3302,6 +3302,29 @@ void __set_current_blocked(const sigset_t *newset)
+ 	spin_unlock_irq(&tsk->sighand->siglock);
+ }
+ 
++void set_current_blocked_fastpath(sigset_t *newset)
++{
++	sigdelsetmask(newset, sigmask(SIGKILL) | sigmask(SIGSTOP));
++	__set_current_blocked_fastpath(newset);
++}
++
++void __set_current_blocked_fastpath(const sigset_t *newset)
++{
++	struct task_struct *tsk = current;
++
++	/*
++	 * In case the signal mask hasn't changed, there is nothing we need
++	 * to do. The current->blocked shouldn't be modified by other task.
++	 */
++	if (sigequalsets(&tsk->blocked, newset))
++		return;
++
++	// what if?
++	//spin_lock_irq(&tsk->sighand->siglock);
++	__set_task_blocked(tsk, newset);
++	//spin_unlock_irq(&tsk->sighand->siglock);
++}
++
+ /*
+  * This is also useful for kernel threads that want to temporarily
+  * (or permanently) block certain signals.
+-- 
+2.49.0
+

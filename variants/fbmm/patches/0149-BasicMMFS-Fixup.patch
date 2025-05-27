@@ -1,0 +1,32 @@
+From c1f192e45b38ee0806f7010c2e632c06818ce08f Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Fri, 12 Jan 2024 15:18:53 -0600
+Subject: [PATCH 149/179] BasicMMFS: Fixup
+
+---
+ BasicMMFS/basic.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/BasicMMFS/basic.c b/BasicMMFS/basic.c
+index c8a592eb1ed9..c9c1e2a29cdc 100644
+--- a/BasicMMFS/basic.c
++++ b/BasicMMFS/basic.c
+@@ -152,6 +152,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     }
+ 
+     page_add_file_rmap(page, vma, false);
++    percpu_counter_inc(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
+     set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+ 
+     // No need to invalidate - it was non-present before
+@@ -175,7 +176,6 @@ static int basicmmfs_mmap(struct file *file, struct vm_area_struct *vma)
+ {
+     file_accessed(file);
+     vma->vm_ops = &basicmmfs_vm_ops;
+-    vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
+ 
+     return 0;
+ }
+-- 
+2.49.0
+

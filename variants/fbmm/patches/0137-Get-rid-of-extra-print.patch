@@ -1,0 +1,25 @@
+From 9bbc63ae6909139219a582dc03d17d8c18f563e7 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Thu, 14 Dec 2023 13:48:30 -0600
+Subject: [PATCH 137/179] Get rid of extra print
+
+---
+ mm/file_based_mm.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index de8971187eec..66f1a9d09bc2 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -74,8 +74,6 @@ static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
+ 	proc->pid = pid;
+ 	mt_init(&proc->mappings);
+ 
+-	pr_err("Create new proc %d %s %d\n", pid, proc->mnt_dir_str, ret);
+-
+ 	return proc;
+ }
+ 
+-- 
+2.49.0
+

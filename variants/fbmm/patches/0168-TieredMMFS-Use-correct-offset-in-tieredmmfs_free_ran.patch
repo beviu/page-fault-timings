@@ -1,0 +1,41 @@
+From 06b9eaa0123b558c4caf05fb6fe564042edea086 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Fri, 25 Oct 2024 14:24:06 -0500
+Subject: [PATCH 168/179] TieredMMFS: Use correct offset in
+ tieredmmfs_free_range
+
+The tree of allocated pages for a file in TieredMMFS is indexed
+by the page offset of the page in the file. However, in tieredmmfs_free_range,
+the code was using the absolute offset to search for pages to remove.
+This resulted in munmap just not working.
+
+This patch fixes that.
+---
+ TieredMMFS/fs.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/TieredMMFS/fs.c b/TieredMMFS/fs.c
+index fc6ee92b3d63..95f5d1afa032 100644
+--- a/TieredMMFS/fs.c
++++ b/TieredMMFS/fs.c
+@@ -205,14 +205,14 @@ static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len
+     struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
+     struct rb_node *node, *next_node;
+     struct tieredmmfs_page *page = NULL;
+-    u64 cur_offset = offset;
+     u64 page_offset = offset >> sbi->page_shift;
++    u64 cur_offset = page_offset;
+     u64 num_pages = len >> sbi->page_shift;
+ 
+     write_lock(&inode_info->map_lock);
+-    while (!page && cur_offset < offset + len) {
++    while (!page && cur_offset < page_offset + num_pages) {
+         page = tieredmmfs_find_page(&inode_info->page_maps, cur_offset);
+-        cur_offset += sbi->page_size;
++        cur_offset++;
+     }
+     if (!page) {
+         goto unlock;
+-- 
+2.49.0
+

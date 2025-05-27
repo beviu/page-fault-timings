@@ -1,0 +1,25 @@
+From 57b4bb6b817363dab70fd67b0f79afee7794dc78 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Sun, 14 Jan 2024 21:46:24 -0600
+Subject: [PATCH 152/179] ContigMMFS: Add VM_DONTEXPAND to vm_flags
+
+---
+ ContigMMFS/contig.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ContigMMFS/contig.c b/ContigMMFS/contig.c
+index 92edf655b19c..236be90a267c 100644
+--- a/ContigMMFS/contig.c
++++ b/ContigMMFS/contig.c
+@@ -170,7 +170,7 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
+ 
+     file_accessed(file);
+     vma->vm_ops = &contigmmfs_vm_ops;
+-    vma->vm_flags |= VM_MIXEDMAP;
++    vma->vm_flags |= VM_MIXEDMAP | VM_DONTEXPAND;
+ 
+     return 0;
+ err:
+-- 
+2.49.0
+

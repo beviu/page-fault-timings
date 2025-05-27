@@ -1,0 +1,38 @@
+From 4e030bcad6935583fdf1b007dd72ad68ee3bbe33 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Tue, 3 Sep 2024 15:11:08 -0500
+Subject: [PATCH 164/179] Fix undropped reference stopping MFSs from being
+ unmounted
+
+---
+ mm/file_based_mm.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 1cc4579d9279..5a0e080e2bce 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -860,7 +860,6 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
+ 	struct path p;
+ 	char *buffer;
+ 	struct fbmm_proc *proc;
+-	bool clear_entry = true;
+ 	int ret = 0;
+ 
+ 	if (count > PATH_MAX) {
+@@ -890,10 +889,8 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
+ 
+ 	// Check if the given path is actually a valid directory
+ 	ret = kern_path(buffer, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &p);
+-	if (!ret)
+-		clear_entry = false;
+-
+-	if (!clear_entry) {
++	if (!ret) {
++		path_put(&p);
+ 		proc = task->fbmm_proc;
+ 
+ 		if (!proc) {
+-- 
+2.49.0
+

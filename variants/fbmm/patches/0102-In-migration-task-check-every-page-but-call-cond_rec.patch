@@ -1,0 +1,55 @@
+From 664223fc063ecb55e80349ae8f0c139b613b1322 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Wed, 23 Aug 2023 10:19:45 -0500
+Subject: [PATCH 102/179] In migration task, check every page, but call
+ cond_reched periodically
+
+---
+ TieredMMFS/fs.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/TieredMMFS/fs.c b/TieredMMFS/fs.c
+index c4289d39008e..3183645c06de 100644
+--- a/TieredMMFS/fs.c
++++ b/TieredMMFS/fs.c
+@@ -642,7 +642,7 @@ static int tieredmmfs_demote_task(void *data)
+         /**
+          * Demotion code
+          */
+-        pages_to_check = min(fast_dev->active_pages, MAX_MIGRATE);
++        pages_to_check = fast_dev->active_pages;
+ 
+         for (i = 0; i < pages_to_check; i++) {
+             // Don't migrate past the watermark.
+@@ -668,6 +668,9 @@ static int tieredmmfs_demote_task(void *data)
+             }
+ 
+             tieredmmfs_demote_one(sbi, &slow_page);
++
++            if (i != 0 && i % MAX_MIGRATE == 0)
++                cond_resched();
+         }
+ 
+         // If we have a slow_page left over, put it back in the free list
+@@ -680,7 +683,7 @@ static int tieredmmfs_demote_task(void *data)
+             slow_page = NULL;
+         }
+ 
+-        pages_to_check = min(slow_dev->active_pages, MAX_MIGRATE);
++        pages_to_check = slow_dev->active_pages;
+ 
+         for (i = 0; i < pages_to_check; i++) {
+             // Don't migrate past the watermark.
+@@ -704,6 +707,9 @@ static int tieredmmfs_demote_task(void *data)
+             }
+ 
+             tieredmmfs_promote_one(sbi, &fast_page);
++
++            if (i != 0 && i % MAX_MIGRATE == 0)
++                cond_resched();
+         }
+ 
+         // If we have a fast_page left over, put it back in the free list
+-- 
+2.49.0
+

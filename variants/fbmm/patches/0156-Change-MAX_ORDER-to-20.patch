@@ -1,0 +1,48 @@
+From f304cb4088606e7582c53c2a8d34b05eec0d9505 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Mon, 15 Jan 2024 17:33:11 -0600
+Subject: [PATCH 156/179] Change MAX_ORDER to 20
+
+---
+ arch/x86/include/asm/sparsemem.h | 6 +++---
+ include/linux/mmzone.h           | 2 +-
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/include/asm/sparsemem.h b/arch/x86/include/asm/sparsemem.h
+index 64df897c0ee3..0979a0db90e2 100644
+--- a/arch/x86/include/asm/sparsemem.h
++++ b/arch/x86/include/asm/sparsemem.h
+@@ -18,14 +18,14 @@
+ 
+ #ifdef CONFIG_X86_32
+ # ifdef CONFIG_X86_PAE
+-#  define SECTION_SIZE_BITS	29
++#  define SECTION_SIZE_BITS	31
+ #  define MAX_PHYSMEM_BITS	36
+ # else
+-#  define SECTION_SIZE_BITS	26
++#  define SECTION_SIZE_BITS	31
+ #  define MAX_PHYSMEM_BITS	32
+ # endif
+ #else /* CONFIG_X86_32 */
+-# define SECTION_SIZE_BITS	27 /* matt - 128 is convenient right now */
++# define SECTION_SIZE_BITS	31 /* matt - 128 is convenient right now */
+ # define MAX_PHYSMEM_BITS	(pgtable_l5_enabled() ? 52 : 46)
+ #endif
+ 
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index dd72c248cb2e..28e69ab0b2a1 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -25,7 +25,7 @@
+ 
+ /* Free memory management - zoned buddy allocator.  */
+ #ifndef CONFIG_ARCH_FORCE_MAX_ORDER
+-#define MAX_ORDER 15
++#define MAX_ORDER 20
+ #else
+ #define MAX_ORDER CONFIG_ARCH_FORCE_MAX_ORDER
+ #endif
+-- 
+2.49.0
+

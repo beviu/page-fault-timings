@@ -1,0 +1,25 @@
+From e05981a5368612c734a37fbe14db288cf2c9d899 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Thu, 20 Jan 2022 15:13:12 -0600
+Subject: [PATCH 026/179] Reset file register times too
+
+---
+ mm/file_only_mem.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index bbdf0d5279a4..e3fafbe339af 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -613,6 +613,8 @@ static ssize_t fom_stats_store(struct kobject *kobj,
+ {
+ 	file_create_time = 0;
+ 	num_file_creates = 0;
++	file_register_time = 0;
++	num_file_registers = 0;
+ 	return count;
+ }
+ static struct kobj_attribute fom_stats_attribute =
+-- 
+2.49.0
+

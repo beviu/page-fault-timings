@@ -1,0 +1,296 @@
+From 917e79a9e6b8882ea0570801dc921b2392a46e5c Mon Sep 17 00:00:00 2001
+From: SepehrDV2 <sepehr.jalalian.edu@gmail.com>
+Date: Wed, 1 Nov 2023 17:48:35 -0700
+Subject: [PATCH 03/14] dma request chans multi process simple
+
+---
+ fs/userfaultfd.c                 | 71 +++++++++++++++++++++++++-------
+ include/uapi/linux/userfaultfd.h |  1 -
+ mm/userfaultfd.c                 | 51 ++++++++++++++++++++---
+ 3 files changed, 100 insertions(+), 23 deletions(-)
+
+diff --git a/fs/userfaultfd.c b/fs/userfaultfd.c
+index 85912f18a0c6..f8e0fc807cc9 100644
+--- a/fs/userfaultfd.c
++++ b/fs/userfaultfd.c
+@@ -506,17 +506,28 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
+ 	 */
+ 	set_current_state(blocking_state);
+ 	spin_unlock_irq(&ctx->fault_pending_wqh.lock);
+-	if(vma_is_dax(vmf->vma))
+-		must_wait = userfaultfd_huge_must_wait(ctx, vmf->vma,
++	if(vma_is_dax(vmf->vma)){
++		if(vma_mmu_pagesize(vmf->vma) == PAGE_SIZE){
++			must_wait = userfaultfd_must_wait(ctx,
++						       vmf->address,
++						       vmf->flags, reason);
++		}
++		else{
++			must_wait = userfaultfd_huge_must_wait(ctx, vmf->vma,
+ 						       vmf->address,
+-						       vmf->flags, reason);		 
+-	else if (!is_vm_hugetlb_page(vmf->vma))
++						       vmf->flags, reason);
++	
++		}		
++	} 
++	else if (!is_vm_hugetlb_page(vmf->vma)){
+ 		must_wait = userfaultfd_must_wait(ctx, vmf->address, vmf->flags,
+ 						  reason);
+-	else
++	}
++	else{
+ 		must_wait = userfaultfd_huge_must_wait(ctx, vmf->vma,
+ 						       vmf->address,
+ 						       vmf->flags, reason);
++	}
+ 	mmap_read_unlock(mm);
+ 
+ 	if (likely(must_wait && !READ_ONCE(ctx->released))) {
+@@ -1266,15 +1277,22 @@ static inline bool vma_can_userfault(struct vm_area_struct *vma,
+ {
+ 	/* FIXME: add WP support to hugetlbfs and shmem */
+ 	if (vm_flags & VM_UFFD_WP) {
+-		if (is_vm_hugetlb_page(vma) || vma_is_shmem(vma))
++		if (is_vm_hugetlb_page(vma) || vma_is_shmem(vma)){
++			printk("forbiding uffd wp for this region\n");
++			if(vma_is_dax(vma)){
++				printk("forbidden vma was dax\n");
++			}
+ 			return false;
++		}
+ 	}
+ 
+ 	if (vm_flags & VM_UFFD_MINOR) {
+ 		if (!(is_vm_hugetlb_page(vma) || vma_is_shmem(vma)))
+ 			return false;
+ 	}
+-
++	if(vma_is_dax(vma)){
++		printk("allowing uffd for dax region\n");
++	}
+ 	return vma_is_anonymous(vma) || is_vm_hugetlb_page(vma) || vma_is_dax(vma) ||
+ 	       vma_is_shmem(vma);
+ }
+@@ -1813,6 +1831,7 @@ static int userfaultfd_writeprotect(struct userfaultfd_ctx *ctx,
+ 	struct userfaultfd_wake_range range;
+ 	bool mode_wp, mode_dontwake;
+ 
++	//printk("userfaultfd_writeprotect started\n");
+ 	if (atomic_read(&ctx->mmap_changing))
+ 		return -EAGAIN;
+ 
+@@ -1824,36 +1843,50 @@ static int userfaultfd_writeprotect(struct userfaultfd_ctx *ctx,
+ 
+ 	ret = validate_range(ctx->mm, uffdio_wp.range.start,
+ 			     uffdio_wp.range.len);
+-	if (ret)
++	if (ret){
++		printk("userfaultfd_writeprotect validate_range err\n");
++	
+ 		return ret;
+-
++	}
+ 	if (uffdio_wp.mode & ~(UFFDIO_WRITEPROTECT_MODE_DONTWAKE |
+-			       UFFDIO_WRITEPROTECT_MODE_WP))
++			       UFFDIO_WRITEPROTECT_MODE_WP)){
++		printk("userfaultfd_writeprotect not wp, dontwake mode\n");
++	
+ 		return -EINVAL;
+-
++				   }
+ 	mode_wp = uffdio_wp.mode & UFFDIO_WRITEPROTECT_MODE_WP;
+ 	mode_dontwake = uffdio_wp.mode & UFFDIO_WRITEPROTECT_MODE_DONTWAKE;
+ 
+-	if (mode_wp && mode_dontwake)
++	if (mode_wp && mode_dontwake){
++		printk("userfaultfd_writeprotect mode_wp & mode_dontwake\n");
++	
+ 		return -EINVAL;
+-
++	}
+ 	if (mmget_not_zero(ctx->mm)) {
+ 		ret = mwriteprotect_range(ctx->mm, uffdio_wp.range.start,
+ 					  uffdio_wp.range.len, mode_wp,
+ 					  &ctx->mmap_changing);
+ 		mmput(ctx->mm);
+ 	} else {
++		printk("userfaultfd_writeprotect mmget_not_zero fail\n");
++	
+ 		return -ESRCH;
+ 	}
+ 
+-	if (ret)
++	if (ret){
++		printk("userfaultfd_writeprotect ret\n");
++	
+ 		return ret;
+-
++	}
+ 	if (!mode_wp && !mode_dontwake) {
+ 		range.start = uffdio_wp.range.start;
+ 		range.len = uffdio_wp.range.len;
+ 		wake_userfault(ctx, &range);
+ 	}
++	if(ret){
++		printk("userfaultfd_writeprotect wake ret error\n");
++	
++	}
+ 	return ret;
+ }
+ 
+@@ -2330,8 +2363,10 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
+ 	int ret = -EINVAL;
+ 	struct userfaultfd_ctx *ctx = file->private_data;
+ 
+-	if (cmd != UFFDIO_API && !userfaultfd_is_initialized(ctx))
++	if (cmd != UFFDIO_API && !userfaultfd_is_initialized(ctx)){
++		printk("uffd ioctl not initialized, going einval\n");
+ 		return -EINVAL;
++	}
+ 
+ 	switch(cmd) {
+ 	case UFFDIO_API:
+@@ -2353,6 +2388,7 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
+ 		ret = userfaultfd_zeropage(ctx, arg);
+ 		break;
+ 	case UFFDIO_WRITEPROTECT:
++		//printk("ioctl calling writeprotect\n");
+ 		ret = userfaultfd_writeprotect(ctx, arg);
+ 		break;
+ 	case UFFDIO_CONTINUE:
+@@ -2381,6 +2417,9 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
+         break;
+ 
+ 	}
++	//if(ret == -EINVAL){
++	//	printk("uffd ioctl command not found, going einval\n");
++	//}
+ 	return ret;
+ }
+ 
+diff --git a/include/uapi/linux/userfaultfd.h b/include/uapi/linux/userfaultfd.h
+index a1c65d00959f..5f02176789cc 100644
+--- a/include/uapi/linux/userfaultfd.h
++++ b/include/uapi/linux/userfaultfd.h
+@@ -47,7 +47,6 @@
+ 	((__u64)1 << _UFFDIO_WAKE |		\
+ 	 (__u64)1 << _UFFDIO_COPY |		\
+ 	 (__u64)1 << _UFFDIO_CONTINUE | \
+-	 (__u64)1 << _UFFDIO_COPY |		\
+ 	 (__u64)1 << _UFFDIO_TLBFLUSH | \
+    (__u64)1 << _UFFDIO_CR3      | \
+    (__u64)1 << _UFFDIO_GET_FLAG | \
+diff --git a/mm/userfaultfd.c b/mm/userfaultfd.c
+index f5830ff2e12c..ee093bd39312 100644
+--- a/mm/userfaultfd.c
++++ b/mm/userfaultfd.c
+@@ -788,6 +788,8 @@ static void  page_walk(u64 address, u64* phy_addr)
+ 
+ int dma_request_channs(struct uffdio_dma_channs* uffdio_dma_channs)
+ {
++
++#if 0
+     struct dma_chan *chan = NULL;
+     dma_cap_mask_t mask;
+     int index;
+@@ -834,10 +836,15 @@ int dma_request_channs(struct uffdio_dma_channs* uffdio_dma_channs)
+     }
+ 
+     return -1;
++
++#else
++	return 0;
++#endif
+ }
+ 
+ int dma_release_channs(void)
+ {
++#if 0
+     int index;
+ 
+     for (index = 0; index < dma_channs; index++) {
+@@ -849,6 +856,7 @@ int dma_release_channs(void)
+ 
+     dma_channs = 0;
+     size_per_dma_request = MAX_SIZE_PER_DMA_REQUEST;
++#endif
+     return 0;
+ }
+ 
+@@ -879,13 +887,32 @@ static __always_inline ssize_t __dma_mcopy_pages(struct mm_struct *dst_mm,
+     int index = 0;
+ 	u64 count = 0;
+     u64 expect_count = 0;
+-    static u64 dma_assign_index = 0;
++    static atomic64_t dma_assign_index = ATOMIC_INIT(0);
+ 	struct tx_dma_param tx_dma_param;
+     u64 dma_len = 0;
+     u64 start, end;
+     u64 start_walk, end_walk;
+     u64 start_copy, end_copy;
+ 
++	// First, grab all grabbable DMA channels
++    if(dma_channs == 0) {
++      dma_cap_mask_t mask;
++      dma_cap_zero(mask);
++      dma_cap_set(DMA_MEMCPY, mask);
++      for (index = 0; index < MAX_DMA_CHANS; index++) {
++        chan = dma_request_channel(mask, NULL, NULL);
++        if (chan == NULL) {
++	  printk("wei: error when dma_request_channel, index=%d\n", index);
++	  break;
++        }
++
++        chans[index] = chan;
++      }
++
++      dma_channs = index;
++      BUG_ON(dma_channs == 0);
++    }
++
+     #ifdef DEBUG_TM
+     start = rdtsc();
+     #endif
+@@ -940,8 +967,9 @@ static __always_inline ssize_t __dma_mcopy_pages(struct mm_struct *dst_mm,
+         #endif
+         for (src_cur = src_start, dst_cur = dst_start, len_cur = 0; len_cur < len;) {
+             err = 0;
+-		    chan = chans[dma_assign_index++ % dma_channs];
+-            if (len_cur + size_per_dma_request > len) {
++		    chan = chans[atomic64_read(&dma_assign_index) % dma_channs];
++		    atomic64_inc(&dma_assign_index);
++			if (len_cur + size_per_dma_request > len) {
+                 dma_len = len - len_cur; 
+             }
+             else {
+@@ -1062,12 +1090,23 @@ int mwriteprotect_range(struct mm_struct *dst_mm, unsigned long start,
+ 	 * Make sure the vma is not shared, that the dst range is
+ 	 * both valid and fully within a single existing vma.
+ 	 */
+-	if (!dst_vma || (dst_vma->vm_flags & VM_SHARED))
++	//if (!dst_vma || (dst_vma->vm_flags & VM_SHARED)){
++	if (!dst_vma || ((dst_vma->vm_flags & VM_SHARED) && !vma_is_dax(dst_vma))) {
++
++		printk("mm/userfaultfd.c: mwriteprotect_range: dst_vma is null\n");
++		
+ 		goto out_unlock;
+-	if (!userfaultfd_wp(dst_vma))
++	}
++	if (!userfaultfd_wp(dst_vma)){
++		printk("mm/userfaultfd.c: mwriteprotect_range: dst_vma is not userfaultfd_wp\n");
++		
+ 		goto out_unlock;
+-	if (!vma_is_anonymous(dst_vma))
++	}
++	if (!(vma_is_anonymous(dst_vma) || vma_is_dax(dst_vma))){
++		printk("mm/userfaultfd.c: mwriteprotect_range: dst_vma is not anonymous or dax\n");
++		
+ 		goto out_unlock;
++	}
+ 
+ 	if (enable_wp)
+ 		newprot = vm_get_page_prot(dst_vma->vm_flags & ~(VM_WRITE));
+-- 
+2.49.0
+

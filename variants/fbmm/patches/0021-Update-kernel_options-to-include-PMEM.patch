@@ -1,0 +1,31 @@
+From cfcf5e22fd11183862a5066f22999901cdb3ab22 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Mon, 8 Nov 2021 09:51:24 -0600
+Subject: [PATCH 021/179] Update kernel_options to include PMEM
+
+---
+ kernel_options | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/kernel_options b/kernel_options
+index 6bebbc9f20b9..310772de0b72 100644
+--- a/kernel_options
++++ b/kernel_options
+@@ -26,6 +26,14 @@ CONFIG_TRANSPARENT_HUGEPAGE=y
+ To have ramdisks in /dev:
+ CONFIG_BLK_DEV_RAM=y
+ 
++To have PMEM:
++CONFIG_BLK_DEV_PMEM
++CONFIG_ND_BLK
++CONFIG_BTT
++CONFIG_NVDIMM_PFN
++CONFIG_NVDIMM_DAX
++CONFIG_X86_PMEM_LEGACY
++
+ For QEMU:
+ CONFIG_BLK_DEV_INITRD=y
+ CONFIG_PCI=y
+-- 
+2.49.0
+

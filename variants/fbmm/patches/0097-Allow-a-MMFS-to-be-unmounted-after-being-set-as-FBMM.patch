@@ -1,0 +1,27 @@
+From 4ce3de8006c79d818193563eae7f32d2a63ceb3e Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Fri, 14 Apr 2023 13:55:29 -0500
+Subject: [PATCH 097/179] Allow a MMFS to be unmounted after being set as FBMM
+ dir
+
+---
+ mm/file_based_mm.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index ca6db4c7f71e..99a78bdbfc96 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -554,6 +554,9 @@ static ssize_t fbmm_dir_store(struct kobject *kobj,
+ 		return err;
+ 	}
+ 
++	// Free the reference to the path so we can unmount the fs
++	path_put(&p);
++
+ 	return count;
+ }
+ static struct kobj_attribute fbmm_file_dir_attribute =
+-- 
+2.49.0
+

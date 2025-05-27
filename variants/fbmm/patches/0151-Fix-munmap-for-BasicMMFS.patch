@@ -1,0 +1,135 @@
+From 2809467dd285871d33aea58d149603c774a25176 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Fri, 12 Jan 2024 23:31:44 -0600
+Subject: [PATCH 151/179] Fix munmap for BasicMMFS
+
+---
+ BasicMMFS/basic.c  |  5 ++---
+ mm/file_based_mm.c | 51 +++++++++++++++++++++++++++++++---------------
+ mm/mmap.c          |  3 +--
+ 3 files changed, 38 insertions(+), 21 deletions(-)
+
+diff --git a/BasicMMFS/basic.c b/BasicMMFS/basic.c
+index b8f436d9ff17..ef781a26bf7f 100644
+--- a/BasicMMFS/basic.c
++++ b/BasicMMFS/basic.c
+@@ -121,14 +121,13 @@ void basicmmfs_free_range(struct inode *inode, u64 offset, loff_t len)
+     u64 cur_addr = start_addr;
+     u64 cur_end;
+ 
+-    walk_ops.pte_entry = basicmmfs_free_pte;
+-
+ 	while (cur_addr < end_addr) {
+         vma = find_vma(mm, cur_addr);
+         if (!vma)
+             break;
++
+         // Make sure this VMA maps this file
+-        if (vma->vm_file->f_inode != inode) {
++        if (!vma->vm_file || vma->vm_file->f_inode != inode) {
+             cur_addr = vma->vm_end;
+             continue;
+         }
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index a7dffc784544..ffa11c845bd9 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -446,8 +446,9 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
+ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 	struct fbmm_proc *proc = NULL;
+ 	struct fbmm_file *fbmm_file = NULL;
++	struct fbmm_file *prev_file = NULL;
+ 	unsigned long end = start + len;
+-	unsigned long falloc_offset, falloc_len;
++	unsigned long falloc_start_offset, falloc_end_offset, falloc_len;
+ 	int ret = 0;
+ 	u64 start_time = rdtsc();
+ 	u64 end_time;
+@@ -457,30 +458,48 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 	if (!proc)
+ 		return 0;
+ 
++	// Finds the last (by va_start) mapping where file->va_start <= start, so we have to
++	// check this file is actually within the range
++	fbmm_file = mt_prev(&proc->files_mt, start + 1, 0);
++	if (!fbmm_file || fbmm_file->va_end <= start)
++		goto exit;
++
++	// Since the ranges overlap, we have to keep going backwards until we
++	// the first mapping where file->va_start <= start and file->va_end > start
++	while (1) {
++		prev_file = mt_prev(&proc->files_mt, fbmm_file->va_start, 0);
++		if (!prev_file || prev_file->va_end <= start)
++			break;
++		fbmm_file = prev_file;
++	}
++
+ 	// a munmap call can span multiple memory ranges, so we might have to do this
+ 	// multiple times
+-	while (start < end) {
+-		unsigned long next_start;
+-
+-		// Finds the first mapping where file->va_start <= start, so we have to
+-		// check this file is actually within the range
+-		fbmm_file = mt_prev(&proc->files_mt, start + 1, 0);
+-		if (!fbmm_file || fbmm_file->va_end <= start)
+-			goto exit;
+-
+-		next_start = fbmm_file->va_end;
++	while (fbmm_file) {
++		// Calculate the offset from the start of the file where
++		// we should start freeing
++		if (start > fbmm_file->va_start)
++			falloc_start_offset = start - fbmm_file->va_start;
++		else
++			falloc_start_offset = 0;
+ 
+-		falloc_offset = start - fbmm_file->va_start;
++		// Calculate the offset from the start of the file where
++		// we should stop freeing
+ 		if (fbmm_file->va_end <= end)
+-			falloc_len = fbmm_file->va_end - start;
++			falloc_end_offset = fbmm_file->va_end - fbmm_file->va_start;
+ 		else
+-			falloc_len = end - start;
++			falloc_end_offset = end - fbmm_file->va_start;
++
++		BUG_ON(falloc_start_offset > falloc_end_offset);
++		falloc_len = falloc_end_offset - falloc_start_offset;
+ 
+ 		ret = vfs_fallocate(fbmm_file->f,
+ 				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+-				falloc_offset, falloc_len);
++				falloc_start_offset, falloc_len);
+ 
+-		start = next_start;
++		fbmm_file = mt_next(&proc->files_mt, fbmm_file->va_start, ULONG_MAX);
++		if (!fbmm_file || fbmm_file->va_end <= start)
++			break;
+ 	}
+ 
+ exit:
+diff --git a/mm/mmap.c b/mm/mmap.c
+index eb8ef97e201e..59844b6879bb 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -2529,8 +2529,6 @@ do_mas_align_munmap(struct ma_state *mas, struct vm_area_struct *vma,
+ 	remove_mt(mm, &mas_detach);
+ 	__mt_destroy(&mt_detach);
+ 
+-	fbmm_munmap(current->tgid, start, end - start);
+-
+ 	validate_mm(mm);
+ 	return downgrade ? 1 : 0;
+ 
+@@ -2582,6 +2580,7 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
+ 	if (!vma)
+ 		return 0;
+ 
++	fbmm_munmap(current->tgid, start, end - start);
+ 	return do_mas_align_munmap(mas, vma, mm, start, end, uf, downgrade);
+ }
+ 
+-- 
+2.49.0
+

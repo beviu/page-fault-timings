@@ -1,0 +1,29 @@
+From 00dc5711437c4bef1bbd5ff9fbc0469b8b256804 Mon Sep 17 00:00:00 2001
+From: SepehrDV2 <sepehr.jalalian.edu@gmail.com>
+Date: Mon, 6 Nov 2023 14:03:10 -0800
+Subject: [PATCH 04/14] removing printk
+
+---
+ fs/userfaultfd.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/fs/userfaultfd.c b/fs/userfaultfd.c
+index f8e0fc807cc9..8496d283294b 100644
+--- a/fs/userfaultfd.c
++++ b/fs/userfaultfd.c
+@@ -1290,9 +1290,9 @@ static inline bool vma_can_userfault(struct vm_area_struct *vma,
+ 		if (!(is_vm_hugetlb_page(vma) || vma_is_shmem(vma)))
+ 			return false;
+ 	}
+-	if(vma_is_dax(vma)){
+-		printk("allowing uffd for dax region\n");
+-	}
++	//if(vma_is_dax(vma)){
++	//	printk("allowing uffd for dax region\n");
++	//}
+ 	return vma_is_anonymous(vma) || is_vm_hugetlb_page(vma) || vma_is_dax(vma) ||
+ 	       vma_is_shmem(vma);
+ }
+-- 
+2.49.0
+

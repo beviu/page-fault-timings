@@ -1,0 +1,101 @@
+From 67335db6a47fa9eaf98942190aba2ae94708aa1f Mon Sep 17 00:00:00 2001
+From: beviu <contact@beviu.com>
+Date: Fri, 2 May 2025 12:30:51 +0200
+Subject: [PATCH 1/5] mm: add CONFIG_TRACE_PF to trace PF entry and iret
+
+Add trace points around the page fault ISR to measure the time of entry
+and exit when CONFIG_TRACE_PF is enabled.
+
+Applications opt into tracing by setting ebx to 0xb141a52a before doing
+a page fault. When active and a page fault occurs, the TSC at ISR entry
+is saved in rax, the TSC before ISR return is saved in rcx, and rdx will
+be clobbered.
+---
+ arch/x86/Kconfig.debug    | 16 ++++++++++++++++
+ arch/x86/entry/entry_64.S | 36 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 52 insertions(+)
+
+diff --git a/arch/x86/Kconfig.debug b/arch/x86/Kconfig.debug
+index c95c3aaadf97..6c7cd852440e 100644
+--- a/arch/x86/Kconfig.debug
++++ b/arch/x86/Kconfig.debug
+@@ -173,6 +173,22 @@ config DEBUG_ENTRY
+ 
+ 	  If unsure, say N.
+ 
++config TRACE_PF
++	bool "Trace page faults"
++	depends on X86_64
++	help
++	  This option enables debugging code to read and save the TSC:
++	  1. on page fault entry to make it possible to measure the time between the
++	     fault and the exception handler starting to execute, and
++	  2. right before iret is called to make it possible to measure the time
++	     between the iret and the return to user space.
++
++	  This is only active when ebx contains the value 0xb141a52a before a page
++	  fault. When active and a page fault occurs, the TSC at (1) is saved in
++	  rax, the TSC at (2) is saved in rcx, and rdx will be clobbered.
++
++	  If unsure, say N.
++
+ config DEBUG_NMI_SELFTEST
+ 	bool "NMI Selftest"
+ 	depends on DEBUG_KERNEL && X86_LOCAL_APIC
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index ed04a968cc7d..5d708b0638ac 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -337,6 +337,23 @@ SYM_CODE_START(\asmsym)
+ 	.endif
+ 
+ 	ENDBR
++
++#ifdef CONFIG_TRACE_PF
++	.if \vector == X86_TRAP_PF
++		/* Check for a magic number to read the counter. On a recent CPU, a predicted
++		   branch that is not taken has a latency of less than a cycle, and the cmp
++		   instruction has a latency of a single cycle. */
++		cmpl	$0xb141a52a, %ebx
++		jne	1f
++		ALTERNATIVE_2 "mfence; rdtsc; lfence", \
++			"mfence; lfence; rdtsc; lfence", X86_FEATURE_LFENCE_RDTSC, \
++			"mfence; rdtscp; lfence", X86_FEATURE_RDTSCP
++		salq	$32, %rdx
++		orq	%rdx, %rax
++1:
++	.endif
++#endif
++
+ 	ASM_CLAC
+ 	cld
+ 
+@@ -650,6 +667,25 @@ SYM_INNER_LABEL(early_xen_iret_patch, SYM_L_GLOBAL)
+ 
+ SYM_INNER_LABEL(native_irq_return_iret, SYM_L_GLOBAL)
+ 	ANNOTATE_NOENDBR // exc_double_fault
++
++#ifdef CONFIG_TRACE_PF
++	/* Check for a magic number to read the counter. On a recent CPU, a predicted
++	   branch that is not taken has a latency of less than a cycle, and the cmp
++	   instruction has a latency of a single cycle. */
++	cmpl	$0xb141a52a, %ebx
++	jne	1f
++	pushq	%rdx
++	pushq	%rax
++	ALTERNATIVE "mfence; rdtsc; lfence", \
++		"mfence; lfence; rdtsc; lfence", X86_FEATURE_LFENCE_RDTSC
++	salq	$32, %rdx
++	orq	%rdx, %rax
++	movq	%rax, %rcx
++	popq	%rax
++	popq	%rdx
++1:
++#endif
++
+ 	/*
+ 	 * This may fault.  Non-paranoid faults on return to userspace are
+ 	 * handled by fixup_bad_iret.  These include #SS, #GP, and #NP.
+-- 
+2.49.0
+

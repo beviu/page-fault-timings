@@ -1,0 +1,237 @@
+From a40f5a20cd0536515d45b0e03e41d8976230b8bd Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Tue, 26 Apr 2022 13:02:23 -0500
+Subject: [PATCH 043/179] Add sysfs options to toggle FOM allocation
+ optimizations
+
+These include:
+1) Using nontemporal stores to zero transparent huge pages
+2) A fix to follow_page_mask so it doesn't double count huge dax pages
+3) The write zero support for the pmem driver
+---
+ block/blk-lib.c    |  3 +-
+ mm/file_only_mem.c | 96 ++++++++++++++++++++++++++++++++++++++++++++++
+ mm/gup.c           |  3 +-
+ mm/memory.c        | 29 ++++++++++----
+ 4 files changed, 121 insertions(+), 10 deletions(-)
+
+diff --git a/block/blk-lib.c b/block/blk-lib.c
+index e59c3069e835..61ecd78f7369 100644
+--- a/block/blk-lib.c
++++ b/block/blk-lib.c
+@@ -249,6 +249,7 @@ EXPORT_SYMBOL(__blkdev_issue_zeroout);
+  *  writing zeroes to the device.  See __blkdev_issue_zeroout() for the
+  *  valid values for %flags.
+  */
++extern int fom_pmem_write_zeroes;
+ int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
+ 		sector_t nr_sects, gfp_t gfp_mask, unsigned flags)
+ {
+@@ -265,7 +266,7 @@ int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
+ retry:
+ 	bio = NULL;
+ 	blk_start_plug(&plug);
+-	if (try_write_zeroes) {
++	if (try_write_zeroes && fom_pmem_write_zeroes) {
+ 		ret = __blkdev_issue_write_zeroes(bdev, sector, nr_sects,
+ 						  gfp_mask, &bio, flags);
+ 	} else if (!(flags & BLKDEV_ZERO_NOFALLBACK)) {
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index 04a167164e6b..7897fe80a79c 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -619,12 +619,108 @@ static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
+ static struct kobj_attribute fom_dax_pte_fault_size_attribute =
+ __ATTR(pte_fault_size, 0644, fom_dax_pte_fault_size_show, fom_dax_pte_fault_size_store);
+ 
++int nt_huge_page_zero = 1;
++static ssize_t nt_huge_page_zero_show(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", nt_huge_page_zero);
++}
++
++static ssize_t nt_huge_page_zero_store(struct kobject *kobj,
++		struct kobj_attribute *attr,
++		const char *buf, size_t count)
++{
++	int val;
++	int ret;
++
++	ret = kstrtoint(buf, 0, &val);
++
++	if (ret != 0) {
++		nt_huge_page_zero = 1;
++		return ret;
++	}
++
++	if (val == 0)
++		nt_huge_page_zero = 0;
++	else
++		nt_huge_page_zero = 1;
++
++	return count;
++}
++static struct kobj_attribute nt_huge_page_zero_attribute =
++__ATTR(nt_huge_page_zero, 0644, nt_huge_page_zero_show, nt_huge_page_zero_store);
++
++int fom_follow_page_mask_fix = 1;
++static ssize_t fom_follow_page_mask_fix_show(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", fom_follow_page_mask_fix);
++}
++
++static ssize_t fom_follow_page_mask_fix_store(struct kobject *kobj,
++		struct kobj_attribute *attr,
++		const char *buf, size_t count)
++{
++	int val;
++	int ret;
++
++	ret = kstrtoint(buf, 0, &val);
++
++	if (ret != 0) {
++		fom_follow_page_mask_fix = 1;
++		return ret;
++	}
++
++	if (val == 0)
++		fom_follow_page_mask_fix = 0;
++	else
++		fom_follow_page_mask_fix = 1;
++
++	return count;
++}
++static struct kobj_attribute fom_follow_page_mask_fix_attribute =
++__ATTR(follow_page_mask_fix, 0644, fom_follow_page_mask_fix_show, fom_follow_page_mask_fix_store);
++
++int fom_pmem_write_zeroes = 1;
++static ssize_t fom_pmem_write_zeroes_show(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", fom_pmem_write_zeroes);
++}
++
++static ssize_t fom_pmem_write_zeroes_store(struct kobject *kobj,
++		struct kobj_attribute *attr,
++		const char *buf, size_t count)
++{
++	int val;
++	int ret;
++
++	ret = kstrtoint(buf, 0, &val);
++
++	if (ret != 0) {
++		fom_pmem_write_zeroes = 1;
++		return ret;
++	}
++
++	if (val == 0)
++		fom_pmem_write_zeroes = 0;
++	else
++		fom_pmem_write_zeroes = 1;
++
++	return count;
++}
++static struct kobj_attribute fom_pmem_write_zeroes_attribute =
++__ATTR(pmem_write_zeroes, 0644, fom_pmem_write_zeroes_show, fom_pmem_write_zeroes_store);
++
+ static struct attribute *file_only_mem_attr[] = {
+ 	&fom_state_attribute.attr,
+ 	&fom_pid_attribute.attr,
+ 	&fom_file_dir_attribute.attr,
+ 	&fom_stats_attribute.attr,
+ 	&fom_dax_pte_fault_size_attribute.attr,
++	&nt_huge_page_zero_attribute.attr,
++	&fom_follow_page_mask_fix_attribute.attr,
++	&fom_pmem_write_zeroes_attribute.attr,
+ 	NULL,
+ };
+ 
+diff --git a/mm/gup.c b/mm/gup.c
+index 64e977115a97..da75fc1d90f1 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -644,6 +644,7 @@ static struct page *follow_page_pte(struct vm_area_struct *vma,
+ 	return no_page_table(vma, flags);
+ }
+ 
++extern int fom_follow_page_mask_fix;
+ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
+ 				    unsigned long address, pud_t *pudp,
+ 				    unsigned int flags,
+@@ -669,7 +670,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
+ 		page = follow_devmap_pmd(vma, address, pmd, flags, &ctx->pgmap);
+ 		spin_unlock(ptl);
+ 		if (page) {
+-			if (pmd_val(pmdval) & _PAGE_PSE)
++			if ((pmd_val(pmdval) & _PAGE_PSE) && fom_follow_page_mask_fix)
+ 				ctx->page_mask = HPAGE_PMD_NR - 1;
+ 			return page;
+ 		}
+diff --git a/mm/memory.c b/mm/memory.c
+index c6faf38a38d6..7806e690963a 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -5707,6 +5707,7 @@ static inline void zero_fill_page_ntstores(struct page *page)
+  * operation.  The target subpage will be processed last to keep its
+  * cache lines hot.
+  */
++extern int nt_huge_page_zero;
+ static inline void process_huge_page(
+ 	unsigned long addr_hint, unsigned int pages_per_huge_page,
+ 	void (*process_subpage)(unsigned long addr, int idx, void *arg),
+@@ -5727,8 +5728,11 @@ static inline void process_huge_page(
+ 		/* Process subpages at the end of huge page */
+ 		for (i = pages_per_huge_page - 1; i >= 2 * n; i--) {
+ 			cond_resched();
+-//			process_subpage(addr + i * PAGE_SIZE, i, arg);
+-			zero_fill_page_ntstores(page + i);
++
++			if (nt_huge_page_zero)
++				zero_fill_page_ntstores(page + i);
++			else
++				process_subpage(addr + i * PAGE_SIZE, i, arg);
+ 		}
+ 	} else {
+ 		/* If target subpage in second half of huge page */
+@@ -5737,8 +5741,10 @@ static inline void process_huge_page(
+ 		/* Process subpages at the begin of huge page */
+ 		for (i = 0; i < base; i++) {
+ 			cond_resched();
+-//			process_subpage(addr + i * PAGE_SIZE, i, arg);
+-			zero_fill_page_ntstores(page + i);
++			if (nt_huge_page_zero)
++				zero_fill_page_ntstores(page + i);
++			else
++				process_subpage(addr + i * PAGE_SIZE, i, arg);
+ 		}
+ 	}
+ 	/*
+@@ -5750,11 +5756,18 @@ static inline void process_huge_page(
+ 		int right_idx = base + 2 * l - 1 - i;
+ 
+ 		cond_resched();
+-//		process_subpage(addr + left_idx * PAGE_SIZE, left_idx, arg);
+-		zero_fill_page_ntstores(page + left_idx);
++
++		if (nt_huge_page_zero)
++			zero_fill_page_ntstores(page + left_idx);
++		else
++			process_subpage(addr + left_idx * PAGE_SIZE, left_idx, arg);
++
+ 		cond_resched();
+-//		process_subpage(addr + right_idx * PAGE_SIZE, right_idx, arg);
+-		zero_fill_page_ntstores(page + right_idx);
++
++		if (nt_huge_page_zero)
++			zero_fill_page_ntstores(page + right_idx);
++		else
++			process_subpage(addr + right_idx * PAGE_SIZE, right_idx, arg);
+ 	}
+ }
+ 
+-- 
+2.49.0
+

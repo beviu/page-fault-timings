@@ -1,0 +1,26 @@
+From 55bee8baecc9c0654f4d6f0e534d67f22ac7cf3f Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Thu, 14 Dec 2023 13:47:46 -0600
+Subject: [PATCH 136/179] FBMM: Use file_open_root since vfd_tmpfile_open
+ interracts weird with pthread_Create
+
+---
+ mm/file_based_mm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 9b4f11b0c4fc..de8971187eec 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -171,7 +171,7 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
+ 	}
+ 
+ 	path = &proc->mnt_dir_path;
+-	f = vfs_tmpfile_open(mnt_user_ns(path->mnt), path, open_mode, open_flags, current_cred());
++	f = file_open_root(path, "", open_flags, open_mode);
+ 	if (IS_ERR(f)) {
+ 		goto err;
+ 	}
+-- 
+2.49.0
+

@@ -1,0 +1,25 @@
+From 6cc1cca85f142e7236cc0a30ccedb36e6014370b Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Sun, 29 Oct 2023 20:36:43 -0500
+Subject: [PATCH 117/179] Set MAX_ORDER to 15
+
+---
+ include/linux/mmzone.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index cd28a100d9e4..dd72c248cb2e 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -25,7 +25,7 @@
+ 
+ /* Free memory management - zoned buddy allocator.  */
+ #ifndef CONFIG_ARCH_FORCE_MAX_ORDER
+-#define MAX_ORDER 11
++#define MAX_ORDER 15
+ #else
+ #define MAX_ORDER CONFIG_ARCH_FORCE_MAX_ORDER
+ #endif
+-- 
+2.49.0
+

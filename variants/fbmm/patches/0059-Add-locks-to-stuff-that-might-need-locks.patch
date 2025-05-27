@@ -1,0 +1,181 @@
+From b98b2ba3dae56a1cb1ca0def76a99ac4b0284369 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Mon, 17 Oct 2022 12:07:15 -0500
+Subject: [PATCH 059/179] Add locks to stuff that might need locks
+
+---
+ FOMTierFS/fomtierfs_rb.c |  4 +++-
+ FOMTierFS/fs.c           | 27 +++++++++++++++++++++++++--
+ FOMTierFS/fs.h           |  3 +++
+ 3 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/FOMTierFS/fomtierfs_rb.c b/FOMTierFS/fomtierfs_rb.c
+index b63da524dbb5..f92b2e31706f 100644
+--- a/FOMTierFS/fomtierfs_rb.c
++++ b/FOMTierFS/fomtierfs_rb.c
+@@ -1,7 +1,8 @@
+ #include "fs.h"
+ 
+ /*
+- * Search a mapping tree for the file offset->page mapping given a file offset
++ * Search a mapping tree for the file offset->page mapping given a file offset.
++ * fomtierfs_inode_info->map_lock should be held in read mode.
+  * @root The root of the rb tree to search
+  * @offset The page offset to look for
+  *
+@@ -27,6 +28,7 @@ struct fomtierfs_page_map *fomtierfs_find_map(struct rb_root *root, u64 offset)
+ 
+ /*
+  * Insert a new mapping into a mapping tree
++ * fomtierfs_inode_info->map_lock should be held in write mode.
+  * @root The root of the rb tree to insert into
+  * @map The mapping to insert into the tree
+  *
+diff --git a/FOMTierFS/fs.c b/FOMTierFS/fs.c
+index efee71adbea2..5ef82d98db8c 100644
+--- a/FOMTierFS/fs.c
++++ b/FOMTierFS/fs.c
+@@ -59,9 +59,12 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct fomtierfs_sb_info *sbi)
+             return NULL;
+         }
+     }
++
++    spin_lock(&prim->lock);
+     page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
+     list_del(&page->list);
+     prim->free_pages--;
++    spin_unlock(&prim->lock);
+ 
+     clear_page(prim->virt_addr + (page->page_num << PAGE_SHIFT));
+ 
+@@ -86,9 +89,12 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
+     iomap->offset = offset;
+     iomap->length = length;
+ 
++    read_lock(&inode_info->map_lock);
+     mapping = fomtierfs_find_map(&inode_info->page_maps, page_offset);
+ 
+     if (!mapping) {
++        read_unlock(&inode_info->map_lock);
++
+         mapping = kzalloc(sizeof(struct fomtierfs_page_map), GFP_KERNEL);
+         if (!mapping) {
+             pr_err("FOMTierFS: Error allocating new mapping");
+@@ -102,6 +108,7 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
+         }
+ 
+         // Save this new mapping
++        write_lock(&inode_info->map_lock);
+         mapping->page_offset = page_offset;
+         mapping->page = page;
+         if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
+@@ -113,6 +120,7 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
+         iomap->addr = page->page_num << page_shift;
+         iomap->bdev = sbi->mem[page->type].bdev;
+         iomap->dax_dev = sbi->mem[page->type].daxdev;
++        write_unlock(&inode_info->map_lock);
+     } else {
+         // There is already a page allocated for this offset, so just use that
+         page = mapping->page;
+@@ -120,6 +128,8 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
+         iomap->addr = page->page_num << page_shift;
+         iomap->bdev = sbi->mem[page->type].bdev;
+         iomap->dax_dev = sbi->mem[page->type].daxdev;
++
++        read_unlock(&inode_info->map_lock);
+     }
+ 
+     return 0;
+@@ -202,9 +212,11 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
+ 
+         mapping->page_offset = off >> PAGE_SHIFT;
+         mapping->page = page;
++        write_lock(&inode_info->map_lock);
+         if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
+             BUG();
+         }
++        write_unlock(&inode_info->map_lock);
+     }
+ 
+     return 0;
+@@ -247,6 +259,7 @@ struct inode *fomtierfs_get_inode(struct super_block *sb,
+         return NULL;
+     }
+     info->page_maps = RB_ROOT;
++    rwlock_init(&info->map_lock);
+ 
+     inode->i_ino = get_next_ino();
+     inode_init_owner(&init_user_ns, inode, dir, mode);
+@@ -355,22 +368,30 @@ static void fomtierfs_free_inode(struct inode *inode) {
+     struct rb_node *node = inode_info->page_maps.rb_node;
+     struct fomtierfs_page_map *mapping;
+     struct fomtierfs_page *page;
++    struct fomtierfs_dev_info *dev;
+ 
+     // Free each mapping in the inode, and place each page back into the free list
++    write_lock(&inode_info->map_lock);
+     while (node) {
+         mapping = container_of(node, struct fomtierfs_page_map, node);
+ 
+         rb_erase(node, &inode_info->page_maps);
+ 
+         page = mapping->page;
++        dev = &sbi->mem[page->type];
+ 
+-        list_add_tail(&page->list, &sbi->mem[page->type].free_list);
+-        sbi->mem[page->type].free_pages++;
++        spin_lock(&dev->lock);
++        list_add_tail(&page->list, &dev->free_list);
++        dev->free_pages++;
++        spin_unlock(&dev->lock);
+ 
+         kfree(mapping);
+ 
+         node = inode_info->page_maps.rb_node;
+     }
++    write_unlock(&inode_info->map_lock);
++
++    kfree(inode_info);
+ 
+ }
+ 
+@@ -470,6 +491,8 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
+         i++;
+     }
+ 
++    spin_lock_init(&di->lock);
++
+     return 0;
+ 
+ err:
+diff --git a/FOMTierFS/fs.h b/FOMTierFS/fs.h
+index eb2314b36430..21a7b38a27a2 100644
+--- a/FOMTierFS/fs.h
++++ b/FOMTierFS/fs.h
+@@ -4,6 +4,7 @@
+ #include <linux/types.h>
+ #include <linux/fs.h>
+ #include <linux/rbtree.h>
++#include <linux/spinlock.h>
+ 
+ enum fomtierfs_mem_type {
+     FAST_MEM = 0,
+@@ -29,6 +30,7 @@ struct fomtierfs_dev_info {
+     struct list_head free_list;
+     u64 num_pages;
+     u64 free_pages;
++    spinlock_t lock;
+ };
+ 
+ struct fomtierfs_sb_info {
+@@ -38,6 +40,7 @@ struct fomtierfs_sb_info {
+ 
+ struct fomtierfs_inode_info {
+     struct rb_root page_maps; // Mapping of offset page to dax page
++    rwlock_t map_lock;
+ };
+ 
+ struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb);
+-- 
+2.49.0
+

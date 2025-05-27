@@ -1,0 +1,29 @@
+From 366106f2afc429b28a9285263ae28706f9aa08cb Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 29 Sep 2021 09:46:07 -0500
+Subject: [PATCH 002/179] Added to list of kernel options
+
+---
+ kernel_options | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/kernel_options b/kernel_options
+index 476d22e07e0f..abad5d6d4679 100644
+--- a/kernel_options
++++ b/kernel_options
+@@ -14,8 +14,12 @@ CONFIG_SLAB_FREELIST_RANDOM=y
+ CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
+ 
+ To enable direct access memory:
++CONFIG_FS_DAX=y
+ CONFIG_DAX=y
+ 
++To enable THP:
++CONFIG_TRANSPARENT_HUGEPAGE=y
++
+ For QEMU:
+ CONFIG_BLK_DEV_INITRD=y
+ CONFIG_PCI=y
+-- 
+2.49.0
+

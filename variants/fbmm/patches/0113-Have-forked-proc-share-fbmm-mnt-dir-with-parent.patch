@@ -1,0 +1,90 @@
+From 48b8b223e672d4da3124f5c046f4d5551a06f33c Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Fri, 27 Oct 2023 11:03:26 -0500
+Subject: [PATCH 113/179] Have forked proc share fbmm mnt dir with parent
+
+---
+ include/linux/file_based_mm.h |  5 +++++
+ kernel/fork.c                 |  6 ++++++
+ mm/file_based_mm.c            | 18 ++++++++++++++++++
+ 3 files changed, 29 insertions(+)
+
+diff --git a/include/linux/file_based_mm.h b/include/linux/file_based_mm.h
+index 9abd7e71f8a7..09c2dd2e8b8e 100644
+--- a/include/linux/file_based_mm.h
++++ b/include/linux/file_based_mm.h
+@@ -15,6 +15,7 @@ void fbmm_register_file(pid_t pid, struct file *f, unsigned long start,
+ 		unsigned long len);
+ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len);
+ void fbmm_check_exiting_proc(pid_t pid);
++int fbmm_copy_mnt_dir(pid_t src, pid_t dst);
+ 
+ #else //CONFIG_FILE_BASED_MM
+ 
+@@ -36,6 +37,10 @@ inline int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 
+ inline void fbmm_check_exiting_proc(pid_t pid) {}
+ 
++int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
++	return 0;
++}
++
+ #endif //CONFIG_FILE_BASED_MM
+ 
+ #endif //__FILE_BASED_MM_H
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 3dea988aec54..b082628db9f8 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -97,6 +97,7 @@
+ #include <linux/io_uring.h>
+ #include <linux/bpf.h>
+ #include <linux/stackprotector.h>
++#include <linux/file_based_mm.h>
+ 
+ #include <asm/pgalloc.h>
+ #include <linux/uaccess.h>
+@@ -2713,6 +2714,11 @@ pid_t kernel_clone(struct kernel_clone_args *args)
+ 		task_unlock(p);
+ 	}
+ 
++	if (use_file_based_mm(current->tgid)) {
++		if (fbmm_copy_mnt_dir(current->tgid, p->tgid)) {
++			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
++		}
++	}
+ 	wake_up_new_task(p);
+ 
+ 	/* forking complete and child started to run, tell ptracer */
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 0ef32fc4eeeb..9797a1883de4 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -475,6 +475,24 @@ void fbmm_check_exiting_proc(pid_t pid) {
+ 		vfree(buf);
+ }
+ 
++// Make the default mmfs dir of the dst the same as src
++int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
++	char *buffer;
++	char *mt_entry;
++	size_t len;
++
++	// Does the src actually have a default mnt dir
++	mt_entry = mtree_load(&fbmm_proc_mnt_dirs, src);
++	if (!mt_entry)
++		return -1;
++
++	len = strnlen(mt_entry, PATH_MAX);
++	buffer = vmalloc(PATH_MAX + 1);
++	strncpy(buffer, mt_entry, len);
++
++	return mtree_store(&fbmm_proc_mnt_dirs, dst, buffer, GFP_KERNEL);
++}
++
+ ///////////////////////////////////////////////////////////////////////////////
+ // sysfs files
+ static ssize_t fbmm_state_show(struct kobject *kobj,
+-- 
+2.49.0
+

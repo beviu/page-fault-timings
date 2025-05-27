@@ -1,0 +1,42 @@
+From 0070feaf80adf71316adebfc12f00ba4ccefafcb Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 27 Oct 2021 15:06:52 -0500
+Subject: [PATCH 020/179] Allocate changes to the sbrk as file only mem
+
+---
+ mm/mmap.c | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 6347f0ca5c11..0a2377e5bd79 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -258,11 +258,21 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
+ 	if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
+ 		goto out;
+ 
+-	brkvma = mas_prev(&mas, mm->start_brk);
+ 	/* Ok, looks good - let it rip. */
+-	if (do_brk_flags(&mas, brkvma, oldbrk, newbrk - oldbrk, 0) < 0)
+-		goto out;
+-
++	if (use_file_only_mem(current->tgid)) {
++		vm_flags_t vm_flags;
++		unsigned long prot = PROT_READ | PROT_WRITE;
++		struct file *f = fom_create_new_file(newbrk-oldbrk, prot);
++
++		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
++			| VM_SHARED | VM_MAYSHARE;
++		mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, 0, NULL);
++		fom_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
++	} else {
++		brkvma = mas_prev(&mas, mm->start_brk);
++		if (do_brk_flags(&mas, brkvma, oldbrk, newbrk-oldbrk, 0) < 0)
++			goto out;
++	}
+ 	mm->brk = brk;
+ 
+ success:
+-- 
+2.49.0
+

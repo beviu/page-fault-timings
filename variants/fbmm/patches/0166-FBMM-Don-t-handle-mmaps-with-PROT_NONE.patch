@@ -1,0 +1,25 @@
+From 471095d5b91489b2bf3426f0bd7df2052d3d616e Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Thu, 10 Oct 2024 10:16:23 -0500
+Subject: [PATCH 166/179] FBMM: Don't handle mmaps with PROT_NONE
+
+---
+ mm/file_based_mm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 781dbfb89bbf..4d7e5266bdb6 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -224,7 +224,7 @@ struct file *fbmm_get_file(struct task_struct *tsk, unsigned long addr, unsigned
+ 	} else if (prot & PROT_WRITE) {
+ 		open_flags |= O_WRONLY;
+ 		open_mode |= S_IWUSR;
+-	} else if (prot & PROT_READ) {
++	} else {
+ 		// It doesn't make sense for anon memory to be read only,
+ 		return NULL;
+ 	}
+-- 
+2.49.0
+

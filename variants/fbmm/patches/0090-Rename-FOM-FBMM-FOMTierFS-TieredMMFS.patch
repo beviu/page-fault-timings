@@ -1,0 +1,2427 @@
+From 48c12abbf3fb5f8364f5eae8a3367031f3f215ef Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Wed, 8 Feb 2023 15:11:02 -0600
+Subject: [PATCH 090/179] Rename FOM->FBMM, FOMTierFS->TieredMMFS
+
+---
+ {FOMTierFS => TieredMMFS}/Kconfig             |   0
+ {FOMTierFS => TieredMMFS}/Makefile            |   4 +-
+ {FOMTierFS => TieredMMFS}/fs.c                | 376 +++++++++---------
+ {FOMTierFS => TieredMMFS}/fs.h                |  38 +-
+ .../tieredmmfs_rb.c                           |  20 +-
+ block/blk-lib.c                               |   4 +-
+ fs/dax.c                                      |   4 +-
+ fs/ext4/extents.c                             |   2 +-
+ fs/ext4/inode.c                               |   4 +-
+ include/linux/file_based_mm.h                 |  39 ++
+ include/linux/file_only_mem.h                 |  39 --
+ kernel/exit.c                                 |   4 +-
+ mm/Kconfig                                    |   6 +-
+ mm/Makefile                                   |   2 +-
+ mm/{file_only_mem.c => file_based_mm.c}       | 354 ++++++++---------
+ mm/gup.c                                      |   8 +-
+ mm/memory.c                                   |   4 +-
+ mm/mmap.c                                     |  26 +-
+ 18 files changed, 467 insertions(+), 467 deletions(-)
+ rename {FOMTierFS => TieredMMFS}/Kconfig (100%)
+ rename {FOMTierFS => TieredMMFS}/Makefile (58%)
+ rename {FOMTierFS => TieredMMFS}/fs.c (74%)
+ rename {FOMTierFS => TieredMMFS}/fs.h (67%)
+ rename FOMTierFS/fomtierfs_rb.c => TieredMMFS/tieredmmfs_rb.c (69%)
+ create mode 100644 include/linux/file_based_mm.h
+ delete mode 100644 include/linux/file_only_mem.h
+ rename mm/{file_only_mem.c => file_based_mm.c} (61%)
+
+diff --git a/FOMTierFS/Kconfig b/TieredMMFS/Kconfig
+similarity index 100%
+rename from FOMTierFS/Kconfig
+rename to TieredMMFS/Kconfig
+diff --git a/FOMTierFS/Makefile b/TieredMMFS/Makefile
+similarity index 58%
+rename from FOMTierFS/Makefile
+rename to TieredMMFS/Makefile
+index 594e5de328e6..bd4624685fad 100644
+--- a/FOMTierFS/Makefile
++++ b/TieredMMFS/Makefile
+@@ -1,5 +1,5 @@
+-obj-m += fomtierfs.o
+-fomtierfs-y += fs.o fomtierfs_rb.o
++obj-m += tieredmmfs.o
++tieredmmfs-y += fs.o tieredmmfs_rb.o
+ 
+ all:
+ 	make -C ../kbuild M=$(PWD) modules
+diff --git a/FOMTierFS/fs.c b/TieredMMFS/fs.c
+similarity index 74%
+rename from FOMTierFS/fs.c
+rename to TieredMMFS/fs.c
+index 63cf8ddc6e38..165f08fac29a 100644
+--- a/FOMTierFS/fs.c
++++ b/TieredMMFS/fs.c
+@@ -25,27 +25,27 @@
+ 
+ // A lot of the boilerplate here is taken from the ramfs code
+ 
+-static const struct super_operations fomtierfs_ops;
+-static const struct inode_operations fomtierfs_dir_inode_operations;
++static const struct super_operations tieredmmfs_ops;
++static const struct inode_operations tieredmmfs_dir_inode_operations;
+ 
+ // This is a copy of the sb_info struct. It should only be used in sysfs files
+-static struct fomtierfs_sb_info *sysfs_sb_info = NULL;
++static struct tieredmmfs_sb_info *sysfs_sb_info = NULL;
+ static u64 num_promotions = 0;
+ static u64 num_demotions = 0;
+ static ktime_t extra_fault_time = 0;
+ static u64 migrate_task_int = 5000;
+ 
+-struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb)
++struct tieredmmfs_sb_info *FTFS_SB(struct super_block *sb)
+ {
+     return sb->s_fs_info;
+ }
+ 
+-struct fomtierfs_inode_info *FTFS_I(struct inode *inode)
++struct tieredmmfs_inode_info *FTFS_I(struct inode *inode)
+ {
+     return inode->i_private;
+ }
+ 
+-static inline void fomtierfs_nt_zero(void *kaddr)
++static inline void tieredmmfs_nt_zero(void *kaddr)
+ {
+ 	__asm__ (
+ 		"push %%rax;"
+@@ -76,7 +76,7 @@ static inline void fomtierfs_nt_zero(void *kaddr)
+ 	);
+ }
+ 
+-static inline void fomtierfs_nt_copy(void *to, void *from)
++static inline void tieredmmfs_nt_copy(void *to, void *from)
+ {
+ 	__asm__ (
+ 		"push %%rax;"
+@@ -117,10 +117,10 @@ static inline void fomtierfs_nt_copy(void *to, void *from)
+ 	);
+ }
+ 
+-struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierfs_sb_info *sbi, u64 page_offset)
++struct tieredmmfs_page *tieredmmfs_alloc_page(struct inode *inode, struct tieredmmfs_sb_info *sbi, u64 page_offset)
+ {
+-    struct fomtierfs_page *page;
+-    struct fomtierfs_dev_info *prim, *sec;
++    struct tieredmmfs_page *page;
++    struct tieredmmfs_dev_info *prim, *sec;
+     void* virt_addr;
+     int i;
+ 
+@@ -139,7 +139,7 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
+         if (!list_empty(&sec->free_list)) {
+             prim = sec;
+         } else {
+-            pr_err("FOMTierFS: No more entries in the free list");
++            pr_err("TieredMMFS: No more entries in the free list");
+             return NULL;
+         }
+     }
+@@ -147,7 +147,7 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
+     spin_lock(&prim->lock);
+ 
+     // Take a page from the free list
+-    page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
++    page = list_first_entry(&prim->free_list, struct tieredmmfs_page, list);
+     list_del(&page->list);
+     prim->free_pages--;
+ 
+@@ -166,14 +166,14 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
+ 
+     virt_addr = prim->virt_addr + (page->page_num << sbi->page_shift);
+     for (i = 0; i < sbi->page_size / PAGE_SIZE; i++)
+-        fomtierfs_nt_zero(virt_addr + (i << PAGE_SHIFT));
++        tieredmmfs_nt_zero(virt_addr + (i << PAGE_SHIFT));
+ 
+     return page;
+ }
+ 
+-void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page *page)
++void tieredmmfs_return_page(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_page *page)
+ {
+-    struct fomtierfs_dev_info *dev;
++    struct tieredmmfs_dev_info *dev;
+ 
+     dev = &sbi->mem[page->type];
+ 
+@@ -196,19 +196,19 @@ void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page
+     spin_unlock(&dev->lock);
+ }
+ 
+-static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
++static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len)
+ {
+-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
++    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
++    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
+     struct rb_node *node, *next_node;
+-    struct fomtierfs_page *page;
++    struct tieredmmfs_page *page;
+     u64 page_offset = offset >> sbi->page_shift;
+     u64 num_pages = len >> sbi->page_shift;
+ 
+     write_lock(&inode_info->map_lock);
+     // TODO: Change this to instead of needing the page at the offset,
+     // just find the first mapping with an offset >= the requested offset.
+-    page = fomtierfs_find_page(&inode_info->page_maps, offset);
++    page = tieredmmfs_find_page(&inode_info->page_maps, offset);
+     if (!page) {
+         return 0;
+     }
+@@ -218,11 +218,11 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
+         next_node = rb_next(node);
+         rb_erase(node, &inode_info->page_maps);
+ 
+-        // fomtierfs_return_page take the fomtierfs_dev_info.lock and fomtierfs_page.lock
++        // tieredmmfs_return_page take the tieredmmfs_dev_info.lock and tieredmmfs_page.lock
+         // which have higher priority than inode_info->map_lock, so we have to give it up
+         write_unlock(&inode_info->map_lock);
+ 
+-        fomtierfs_return_page(sbi, page);
++        tieredmmfs_return_page(sbi, page);
+ 
+         if (!next_node)
+             break;
+@@ -231,7 +231,7 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
+         write_lock(&inode_info->map_lock);
+ 
+         node = next_node;
+-        page = container_of(node, struct fomtierfs_page, node);
++        page = container_of(node, struct tieredmmfs_page, node);
+     }
+ 
+     write_unlock(&inode_info->map_lock);
+@@ -239,7 +239,7 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
+     return 0;
+ }
+ 
+-static pmd_t *fomtierfs_find_pmd(struct vm_area_struct *vma, u64 address)
++static pmd_t *tieredmmfs_find_pmd(struct vm_area_struct *vma, u64 address)
+ {
+     pgd_t *pgd;
+     p4d_t *p4d;
+@@ -268,11 +268,11 @@ static pmd_t *fomtierfs_find_pmd(struct vm_area_struct *vma, u64 address)
+ 
+ // The locks for to_page and from_page should be taken.
+ // The inode_info->map_lock should be taken in write mode
+-static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_info *inode_info,
+-        struct fomtierfs_page *to_page, struct fomtierfs_page *from_page,
++static void migrate_page(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_inode_info *inode_info,
++        struct tieredmmfs_page *to_page, struct tieredmmfs_page *from_page,
+         struct vm_area_struct *vma, unsigned long virt_addr, pmd_t *pmdp)
+ {
+-    struct fomtierfs_dev_info *to_dev, *from_dev;
++    struct tieredmmfs_dev_info *to_dev, *from_dev;
+     void *to_addr, *from_addr;
+     bool writeable = false;
+     int i;
+@@ -311,7 +311,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
+     from_addr = from_dev->virt_addr + (from_page->page_num << sbi->page_shift);
+     for (i = 0; i < sbi->page_size / PAGE_SIZE; i++) {
+         u64 off = i << PAGE_SHIFT;
+-        fomtierfs_nt_copy(to_addr + off, from_addr + off);
++        tieredmmfs_nt_copy(to_addr + off, from_addr + off);
+     }
+ 
+     // Copy the metadata
+@@ -321,7 +321,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
+     to_page->last_accessed = false;
+ 
+     // Replace the olf page with the new page in the map tree
+-    fomtierfs_replace_page(&inode_info->page_maps, to_page);
++    tieredmmfs_replace_page(&inode_info->page_maps, to_page);
+ 
+     // The from page is about to be put in the free list, so clear it
+     from_page->page_offset = 0;
+@@ -355,7 +355,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
+     }
+ }
+ 
+-static bool fomtierfs_page_accessed(struct fomtierfs_page *page, u64 virt_addr, pmd_t *pmdp)
++static bool tieredmmfs_page_accessed(struct tieredmmfs_page *page, u64 virt_addr, pmd_t *pmdp)
+ {
+     int i;
+     pte_t *ptep;
+@@ -376,7 +376,7 @@ static bool fomtierfs_page_accessed(struct fomtierfs_page *page, u64 virt_addr,
+     return false;
+ }
+ 
+-static void fomtierfs_page_mkold(struct vm_area_struct *vma, struct fomtierfs_page *page,
++static void tieredmmfs_page_mkold(struct vm_area_struct *vma, struct tieredmmfs_page *page,
+         u64 virt_addr, pmd_t *pmdp)
+ {
+     int i;
+@@ -399,12 +399,12 @@ static void fomtierfs_page_mkold(struct vm_area_struct *vma, struct fomtierfs_pa
+     }
+ }
+ 
+-static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs_page **slow_page)
++static void tieredmmfs_demote_one(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_page **slow_page)
+ {
+-    struct fomtierfs_inode_info *inode_info;
+-    struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+-    struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
+-    struct fomtierfs_page *page;
++    struct tieredmmfs_inode_info *inode_info;
++    struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
++    struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
++    struct tieredmmfs_page *page;
+     struct vm_area_struct *vma;
+     struct address_space *as;
+     bool accessed, last_accessed;
+@@ -413,7 +413,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
+ 
+     // Grab the page at the end of the active list
+     spin_lock(&fast_dev->lock);
+-    page = list_last_entry(&fast_dev->active_list, struct fomtierfs_page, list);
++    page = list_last_entry(&fast_dev->active_list, struct tieredmmfs_page, list);
+     list_del(&page->list);
+     fast_dev->active_pages--;
+ 
+@@ -442,7 +442,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
+     }
+     virt_addr = vma->vm_start
+         + ((page->page_offset << sbi->page_shift) - (vma->vm_pgoff << PAGE_SHIFT));
+-    pmdp = fomtierfs_find_pmd(vma, virt_addr);
++    pmdp = tieredmmfs_find_pmd(vma, virt_addr);
+     if (!pmdp || !pmd_present(*pmdp)) {
+         list_add(&page->list, &fast_dev->active_list);
+         fast_dev->active_pages++;
+@@ -453,14 +453,14 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
+         return;
+     }
+ 
+-    accessed = fomtierfs_page_accessed(page, virt_addr, pmdp);
++    accessed = tieredmmfs_page_accessed(page, virt_addr, pmdp);
+     last_accessed = page->last_accessed;
+     page->last_accessed = accessed;
+ 
+     // Only demote if this page hasn't been accessed in either of
+     // the last couple of checks
+     if (accessed || last_accessed) {
+-        fomtierfs_page_mkold(vma, page, virt_addr, pmdp);
++        tieredmmfs_page_mkold(vma, page, virt_addr, pmdp);
+ 
+         // The page was accessed recently, so put it back and move
+         // on to the next one.
+@@ -512,12 +512,12 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
+     num_demotions++;
+ }
+ 
+-static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs_page **fast_page)
++static void tieredmmfs_promote_one(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_page **fast_page)
+ {
+-    struct fomtierfs_inode_info *inode_info;
+-    struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+-    struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
+-    struct fomtierfs_page *page;
++    struct tieredmmfs_inode_info *inode_info;
++    struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
++    struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
++    struct tieredmmfs_page *page;
+     struct vm_area_struct *vma;
+     struct address_space *as;
+     bool accessed, last_accessed;
+@@ -526,7 +526,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
+ 
+     // Grab the page at the end of the active list
+     spin_lock(&slow_dev->lock);
+-    page = list_last_entry(&slow_dev->active_list, struct fomtierfs_page, list);
++    page = list_last_entry(&slow_dev->active_list, struct tieredmmfs_page, list);
+     list_del(&page->list);
+     slow_dev->active_pages--;
+ 
+@@ -555,7 +555,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
+     }
+     virt_addr = vma->vm_start
+         + ((page->page_offset << sbi->page_shift)- (vma->vm_pgoff << PAGE_SHIFT));
+-    pmdp = fomtierfs_find_pmd(vma, virt_addr);
++    pmdp = tieredmmfs_find_pmd(vma, virt_addr);
+     if (!pmdp || !pmd_present(*pmdp)) {
+         list_add(&page->list, &slow_dev->active_list);
+         slow_dev->active_pages++;
+@@ -566,13 +566,13 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
+         return;
+     }
+ 
+-    accessed = fomtierfs_page_accessed(page, virt_addr, pmdp);
++    accessed = tieredmmfs_page_accessed(page, virt_addr, pmdp);
+     last_accessed = page->last_accessed;
+     page->last_accessed = accessed;
+ 
+     // Reset the accessed bit if we need to
+     if (accessed)
+-        fomtierfs_page_mkold(vma, page, virt_addr, pmdp);
++        tieredmmfs_page_mkold(vma, page, virt_addr, pmdp);
+ 
+     // Only promote if the page has been accessed in both of the last
+     // couple of checks.
+@@ -626,15 +626,15 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
+ }
+ 
+ // Reader Beware: This function is a mess of locking and unlocking
+-static int fomtierfs_demote_task(void *data)
++static int tieredmmfs_demote_task(void *data)
+ {
+     // The maximum number of pages to migrate in one iteration
+     const u64 MAX_MIGRATE = 1 << 20;
+-    struct fomtierfs_page *slow_page = NULL;
+-    struct fomtierfs_page *fast_page = NULL;
+-    struct fomtierfs_sb_info *sbi = data;
+-    struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+-    struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
++    struct tieredmmfs_page *slow_page = NULL;
++    struct tieredmmfs_page *fast_page = NULL;
++    struct tieredmmfs_sb_info *sbi = data;
++    struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
++    struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
+     u64 pages_to_check;
+     u64 i;
+ 
+@@ -661,13 +661,13 @@ static int fomtierfs_demote_task(void *data)
+                     break;
+                 }
+ 
+-                slow_page = list_first_entry(&slow_dev->free_list, struct fomtierfs_page, list);
++                slow_page = list_first_entry(&slow_dev->free_list, struct tieredmmfs_page, list);
+                 list_del(&slow_page->list);
+                 slow_dev->free_pages--;
+                 spin_unlock(&slow_dev->lock);
+             }
+ 
+-            fomtierfs_demote_one(sbi, &slow_page);
++            tieredmmfs_demote_one(sbi, &slow_page);
+         }
+ 
+         // If we have a slow_page left over, put it back in the free list
+@@ -697,13 +697,13 @@ static int fomtierfs_demote_task(void *data)
+                     break;
+                 }
+ 
+-                fast_page = list_first_entry(&fast_dev->free_list, struct fomtierfs_page, list);
++                fast_page = list_first_entry(&fast_dev->free_list, struct tieredmmfs_page, list);
+                 list_del(&fast_page->list);
+                 fast_dev->free_pages--;
+                 spin_unlock(&fast_dev->lock);
+             }
+ 
+-            fomtierfs_promote_one(sbi, &fast_page);
++            tieredmmfs_promote_one(sbi, &fast_page);
+         }
+ 
+         // If we have a fast_page left over, put it back in the free list
+@@ -721,12 +721,12 @@ static int fomtierfs_demote_task(void *data)
+     return 0;
+ }
+ 
+-static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
++static int tieredmmfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
+                 unsigned flags, struct iomap *iomap, struct iomap *srcmap)
+ {
+-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+-    struct fomtierfs_page *page;
++    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
++    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
++    struct tieredmmfs_page *page;
+     u64 page_offset;
+     u64 page_shift;
+     u64 base_page_offset;
+@@ -751,19 +751,19 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
+     iomap->length = length;
+ 
+     read_lock(&inode_info->map_lock);
+-    page = fomtierfs_find_page(&inode_info->page_maps, page_offset);
++    page = tieredmmfs_find_page(&inode_info->page_maps, page_offset);
+ 
+     if (!page) {
+         read_unlock(&inode_info->map_lock);
+ 
+-        page = fomtierfs_alloc_page(inode, sbi, page_offset);
++        page = tieredmmfs_alloc_page(inode, sbi, page_offset);
+         if (!page) {
+             return -ENOMEM;
+         }
+ 
+         // Save this new mapping
+         write_lock(&inode_info->map_lock);
+-        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
++        if (!tieredmmfs_insert_page(&inode_info->page_maps, page)) {
+             BUG();
+         }
+ 
+@@ -789,80 +789,80 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
+     return 0;
+ }
+ 
+-static int fomtierfs_iomap_end(struct inode *inode, loff_t offset, loff_t length,
++static int tieredmmfs_iomap_end(struct inode *inode, loff_t offset, loff_t length,
+                 ssize_t written, unsigned flags, struct iomap *iomap)
+ {
+     return 0;
+ }
+ 
+-const struct iomap_ops fomtierfs_iomap_ops = {
+-    .iomap_begin = fomtierfs_iomap_begin,
+-    .iomap_end = fomtierfs_iomap_end,
++const struct iomap_ops tieredmmfs_iomap_ops = {
++    .iomap_begin = tieredmmfs_iomap_begin,
++    .iomap_end = tieredmmfs_iomap_end,
+ };
+ 
+-static vm_fault_t fomtierfs_huge_fault(struct vm_fault *vmf, enum page_entry_size pe_size)
++static vm_fault_t tieredmmfs_huge_fault(struct vm_fault *vmf, enum page_entry_size pe_size)
+ {
+     vm_fault_t result = 0;
+     pfn_t pfn;
+     int error;
+ 
+-    result = dax_iomap_fault(vmf, pe_size, &pfn, &error, &fomtierfs_iomap_ops);
++    result = dax_iomap_fault(vmf, pe_size, &pfn, &error, &tieredmmfs_iomap_ops);
+ 
+     return result;
+ }
+ 
+-static vm_fault_t fomtierfs_fault(struct vm_fault *vmf)
++static vm_fault_t tieredmmfs_fault(struct vm_fault *vmf)
+ {
+-    return fomtierfs_huge_fault(vmf, PE_SIZE_PTE);
++    return tieredmmfs_huge_fault(vmf, PE_SIZE_PTE);
+ }
+ 
+-static struct vm_operations_struct fomtierfs_vm_ops = {
+-    .fault = fomtierfs_fault,
+-    .huge_fault = fomtierfs_huge_fault,
+-    .page_mkwrite = fomtierfs_fault,
+-    .pfn_mkwrite = fomtierfs_fault,
++static struct vm_operations_struct tieredmmfs_vm_ops = {
++    .fault = tieredmmfs_fault,
++    .huge_fault = tieredmmfs_huge_fault,
++    .page_mkwrite = tieredmmfs_fault,
++    .pfn_mkwrite = tieredmmfs_fault,
+ };
+ 
+-static int fomtierfs_mmap(struct file *file, struct vm_area_struct *vma)
++static int tieredmmfs_mmap(struct file *file, struct vm_area_struct *vma)
+ {
+     file_accessed(file); // TODO: probably don't need this
+-    vma->vm_ops = &fomtierfs_vm_ops;
++    vma->vm_ops = &tieredmmfs_vm_ops;
+     vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
+ 
+     return 0;
+ }
+ 
+-static unsigned long fomtierfs_mmu_get_unmapped_area(struct file *file,
++static unsigned long tieredmmfs_mmu_get_unmapped_area(struct file *file,
+ 		unsigned long addr, unsigned long len, unsigned long pgoff,
+ 		unsigned long flags)
+ {
+     return thp_get_unmapped_area(file, addr, len, pgoff, flags);
+ }
+ 
+-static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
++static long tieredmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+ {
+     struct inode *inode = file_inode(file);
+-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+-    struct fomtierfs_page *page;
++    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
++    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
++    struct tieredmmfs_page *page;
+     loff_t off;
+ 
+     if (mode & FALLOC_FL_PUNCH_HOLE) {
+-        return fomtierfs_free_range(inode, offset, len);
++        return tieredmmfs_free_range(inode, offset, len);
+     } else if (mode != 0) {
+         return -EOPNOTSUPP;
+     }
+ 
+     // Allocate and add mappings for the desired range
+     for (off = offset; off < offset + len; off += sbi->page_size) {
+-        page = fomtierfs_alloc_page(inode, sbi, off >> sbi->page_shift);
++        page = tieredmmfs_alloc_page(inode, sbi, off >> sbi->page_shift);
+         if (!page) {
+             return -ENOMEM;
+         }
+ 
+         // We normally need to grab inode_info->map_lock, but
+         // since this page is being fallocated, it isn't shared yet.
+-        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
++        if (!tieredmmfs_insert_page(&inode_info->page_maps, page)) {
+             BUG();
+         }
+     }
+@@ -870,38 +870,38 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
+     return 0;
+ }
+ 
+-const struct file_operations fomtierfs_file_operations = {
+-    .mmap		= fomtierfs_mmap,
++const struct file_operations tieredmmfs_file_operations = {
++    .mmap		= tieredmmfs_mmap,
+     .mmap_supported_flags = MAP_SYNC,
+     .fsync		= noop_fsync,
+     .splice_read	= generic_file_splice_read,
+     .splice_write	= iter_file_splice_write,
+     .llseek		= generic_file_llseek,
+-    .get_unmapped_area	= fomtierfs_mmu_get_unmapped_area,
+-    .fallocate = fomtierfs_fallocate,
++    .get_unmapped_area	= tieredmmfs_mmu_get_unmapped_area,
++    .fallocate = tieredmmfs_fallocate,
+ };
+ 
+-const struct inode_operations fomtierfs_file_inode_operations = {
++const struct inode_operations tieredmmfs_file_inode_operations = {
+ 	.setattr	= simple_setattr,
+ 	.getattr	= simple_getattr,
+ };
+ 
+-const struct address_space_operations fomtierfs_aops = {
++const struct address_space_operations tieredmmfs_aops = {
+     .direct_IO = noop_direct_IO,
+     .set_page_dirty = __set_page_dirty_no_writeback,
+     .invalidatepage = noop_invalidatepage,
+ };
+ 
+-struct inode *fomtierfs_get_inode(struct super_block *sb,
++struct inode *tieredmmfs_get_inode(struct super_block *sb,
+                 const struct inode *dir, umode_t mode, dev_t dev)
+ {
+     struct inode *inode = new_inode(sb);
+-    struct fomtierfs_inode_info *info;
++    struct tieredmmfs_inode_info *info;
+ 
+     if (!inode)
+         return NULL;
+ 
+-    info = kzalloc(sizeof(struct fomtierfs_inode_info), GFP_KERNEL);
++    info = kzalloc(sizeof(struct tieredmmfs_inode_info), GFP_KERNEL);
+     if (!info) {
+         pr_err("FOMTierFS: Failure allocating FOMTierFS inode");
+         return NULL;
+@@ -911,17 +911,17 @@ struct inode *fomtierfs_get_inode(struct super_block *sb,
+ 
+     inode->i_ino = get_next_ino();
+     inode_init_owner(&init_user_ns, inode, dir, mode);
+-    inode->i_mapping->a_ops = &fomtierfs_aops;
++    inode->i_mapping->a_ops = &tieredmmfs_aops;
+     inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+     inode->i_flags |= S_DAX;
+     inode->i_private = info;
+     switch (mode & S_IFMT) {
+         case S_IFREG:
+-            inode->i_op = &fomtierfs_file_inode_operations;
+-            inode->i_fop = &fomtierfs_file_operations;
++            inode->i_op = &tieredmmfs_file_inode_operations;
++            inode->i_fop = &tieredmmfs_file_operations;
+             break;
+         case S_IFDIR:
+-            inode->i_op = &fomtierfs_dir_inode_operations;
++            inode->i_op = &tieredmmfs_dir_inode_operations;
+             inode->i_fop = &simple_dir_operations;
+ 
+             /* Directory inodes start off with i_nlink == 2 (for "." entry) */
+@@ -935,10 +935,10 @@ struct inode *fomtierfs_get_inode(struct super_block *sb,
+ }
+ 
+ static int
+-fomtierfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
++tieredmmfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
+         struct dentry *dentry, umode_t mode, dev_t dev)
+ {
+-    struct inode * inode = fomtierfs_get_inode(dir->i_sb, dir, mode, dev);
++    struct inode * inode = tieredmmfs_get_inode(dir->i_sb, dir, mode, dev);
+     int error = -ENOSPC;
+ 
+     if (inode) {
+@@ -951,53 +951,53 @@ fomtierfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
+     return error;
+ }
+ 
+-static int fomtierfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
++static int tieredmmfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
+                 struct dentry *dentry, umode_t mode)
+ {
+     return -EINVAL;
+ }
+ 
+-static int fomtierfs_create(struct user_namespace *mnt_userns, struct inode *dir,
++static int tieredmmfs_create(struct user_namespace *mnt_userns, struct inode *dir,
+                 struct dentry *dentry, umode_t mode, bool excl)
+ {
+-    return fomtierfs_mknod(&init_user_ns, dir, dentry, 0777 | S_IFREG, 0);
++    return tieredmmfs_mknod(&init_user_ns, dir, dentry, 0777 | S_IFREG, 0);
+ }
+ 
+-static int fomtierfs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
++static int tieredmmfs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
+                 struct dentry *dentry, const char *symname)
+ {
+     return -EINVAL;
+ }
+ 
+-static int fomtierfs_tmpfile(struct user_namespace *mnt_userns,
++static int tieredmmfs_tmpfile(struct user_namespace *mnt_userns,
+             struct inode *dir, struct dentry *dentry, umode_t mode)
+ {
+     struct inode *inode;
+ 
+-    inode = fomtierfs_get_inode(dir->i_sb, dir, mode, 0);
++    inode = tieredmmfs_get_inode(dir->i_sb, dir, mode, 0);
+     if (!inode)
+         return -ENOSPC;
+     d_tmpfile(dentry, inode);
+     return 0;
+ }
+ 
+-static const struct inode_operations fomtierfs_dir_inode_operations = {
+-	.create		= fomtierfs_create,
++static const struct inode_operations tieredmmfs_dir_inode_operations = {
++	.create		= tieredmmfs_create,
+ 	.lookup		= simple_lookup,
+ 	.link		= simple_link,
+ 	.unlink		= simple_unlink,
+-	.symlink	= fomtierfs_symlink,
+-	.mkdir		= fomtierfs_mkdir,
++	.symlink	= tieredmmfs_symlink,
++	.mkdir		= tieredmmfs_mkdir,
+ 	.rmdir		= simple_rmdir,
+-	.mknod		= fomtierfs_mknod,
++	.mknod		= tieredmmfs_mknod,
+ 	.rename		= simple_rename,
+-	.tmpfile	= fomtierfs_tmpfile,
++	.tmpfile	= tieredmmfs_tmpfile,
+ };
+ 
+-static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
++static int tieredmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+ {
+     struct super_block *sb = dentry->d_sb;
+-    struct fomtierfs_sb_info *sbi = FTFS_SB(sb);
++    struct tieredmmfs_sb_info *sbi = FTFS_SB(sb);
+ 
+     buf->f_type = sb->s_magic;
+     buf->f_bsize = sbi->page_size;
+@@ -1010,24 +1010,24 @@ static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+     return 0;
+ }
+ 
+-static void fomtierfs_free_inode(struct inode *inode) {
+-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
++static void tieredmmfs_free_inode(struct inode *inode) {
++    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
++    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
+     struct rb_node *node = inode_info->page_maps.rb_node;
+-    struct fomtierfs_page *page;
++    struct tieredmmfs_page *page;
+ 
+     // Free each mapping in the inode, and place each page back into the free list
+     write_lock(&inode_info->map_lock);
+     while (node) {
+-        page = container_of(node, struct fomtierfs_page, node);
++        page = container_of(node, struct tieredmmfs_page, node);
+ 
+         rb_erase(node, &inode_info->page_maps);
+ 
+-        // fomtierfs_return_page take the fomtierfs_dev_info.lock and fomtierfs_page.lock
++        // tieredmmfs_return_page take the tieredmmfs_dev_info.lock and tieredmmfs_page.lock
+         // which have higher priority than inode_info->map_lock, so we have to give it up
+         write_unlock(&inode_info->map_lock);
+ 
+-        fomtierfs_return_page(sbi, page);
++        tieredmmfs_return_page(sbi, page);
+ 
+         write_lock(&inode_info->map_lock);
+ 
+@@ -1039,36 +1039,36 @@ static void fomtierfs_free_inode(struct inode *inode) {
+ 
+ }
+ 
+-static int fomtierfs_show_options(struct seq_file *m, struct dentry *root)
++static int tieredmmfs_show_options(struct seq_file *m, struct dentry *root)
+ {
+     return 0;
+ }
+ 
+-static const struct super_operations fomtierfs_ops = {
+-	.statfs		= fomtierfs_statfs,
+-    .free_inode = fomtierfs_free_inode,
++static const struct super_operations tieredmmfs_ops = {
++	.statfs		= tieredmmfs_statfs,
++    .free_inode = tieredmmfs_free_inode,
+ 	.drop_inode	= generic_delete_inode,
+-	.show_options	= fomtierfs_show_options,
++	.show_options	= tieredmmfs_show_options,
+ };
+ 
+-enum fomtierfs_param {
++enum tieredmmfs_param {
+     Opt_slowmem, Opt_source, Opt_basepage,
+ };
+ 
+-const struct fs_parameter_spec fomtierfs_fs_parameters[] = {
++const struct fs_parameter_spec tieredmmfs_fs_parameters[] = {
+     fsparam_string("slowmem", Opt_slowmem),
+     fsparam_string("source", Opt_source),
+     fsparam_bool("basepage", Opt_basepage),
+     {},
+ };
+ 
+-static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
++static int tieredmmfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
+ {
+     struct fs_parse_result result;
+-    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
++    struct tieredmmfs_context_info *fc_info = (struct tieredmmfs_context_info*)fc->fs_private;
+     int opt;
+ 
+-    opt = fs_parse(fc, fomtierfs_fs_parameters, param, &result);
++    opt = fs_parse(fc, tieredmmfs_fs_parameters, param, &result);
+ 	if (opt < 0) {
+ 		/*
+ 		 * We might like to report bad mount options here;
+@@ -1092,20 +1092,20 @@ static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *par
+         fc_info->base_pages = result.boolean;
+         break;
+     default:
+-        pr_err("FOMTierFS: unrecognized option %s", param->key);
++        pr_err("TieredMMFS: unrecognized option %s", param->key);
+         break;
+     }
+ 
+     return 0;
+ }
+ 
+-static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct block_device *bdev, enum fomtierfs_mem_type type)
++static int tieredmmfs_populate_dev_info(struct tieredmmfs_sb_info *sbi, struct block_device *bdev, enum tieredmmfs_mem_type type)
+ {
+     int ret = 0;
+     long i;
+     long num_base_pages;
+-    struct fomtierfs_dev_info *di = &sbi->mem[type];
+-    struct fomtierfs_page *cursor, *temp;
++    struct tieredmmfs_dev_info *di = &sbi->mem[type];
++    struct tieredmmfs_page *cursor, *temp;
+     // dax_direct_access returns the number of base pages.
+     // We want to work with pages of the size sbi->page_size, so calcualate
+     // this ratio to convert between them.
+@@ -1118,7 +1118,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct blo
+     num_base_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
+                     &di->virt_addr, &di->pfn);
+     if (num_base_pages <= 0) {
+-        pr_err("FOMTierFS: Determining device size failed");
++        pr_err("TieredMMFS: Determining device size failed");
+         return -EIO;
+     }
+ 
+@@ -1131,7 +1131,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct blo
+ 
+     // Put all of the pages into the free list
+     for (i = 0; i < di->num_pages; i++) {
+-        struct fomtierfs_page *page = kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
++        struct tieredmmfs_page *page = kzalloc(sizeof(struct tieredmmfs_page), GFP_KERNEL);
+         if (!page) {
+             ret = -ENOMEM;
+             goto err;
+@@ -1158,12 +1158,12 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct blo
+     return ret;
+ }
+ 
+-static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
++static int tieredmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
+ {
+     struct inode *inode;
+     struct block_device *slow_dev;
+-    struct fomtierfs_sb_info *sbi = kzalloc(sizeof(struct fomtierfs_sb_info), GFP_KERNEL);
+-    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
++    struct tieredmmfs_sb_info *sbi = kzalloc(sizeof(struct tieredmmfs_sb_info), GFP_KERNEL);
++    struct tieredmmfs_context_info *fc_info = (struct tieredmmfs_context_info*)fc->fs_private;
+     int ret;
+ 
+     if (fc_info->base_pages) {
+@@ -1177,17 +1177,17 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
+     sb->s_fs_info = sbi;
+     sb->s_maxbytes = MAX_LFS_FILESIZE;
+     sb->s_magic = 0xDEADBEEF;
+-    sb->s_op = &fomtierfs_ops;
++    sb->s_op = &tieredmmfs_ops;
+     sb->s_time_gran = 1;
+     // The blocksize cannot be larger than PAGE_SIZE
+     if(!sb_set_blocksize(sb, PAGE_SIZE)) {
+-        pr_err("FOMTierFS: error setting blocksize");
++        pr_err("TieredMMFS: error setting blocksize");
+     }
+ 
+     // Populate the device information for the fast and slow mem
+-    ret = fomtierfs_populate_dev_info(sbi, sb->s_bdev, FAST_MEM);
++    ret = tieredmmfs_populate_dev_info(sbi, sb->s_bdev, FAST_MEM);
+     if (ret != 0) {
+-        pr_err("FOMTierFS: Error populating fast mem device information");
++        pr_err("TieredMMFS: Error populating fast mem device information");
+         kfree(sbi);
+         return ret;
+     }
+@@ -1195,18 +1195,18 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
+     slow_dev = blkdev_get_by_path(fc_info->slow_dev_name, FMODE_READ|FMODE_WRITE|FMODE_EXCL, sbi);
+     if (IS_ERR(slow_dev)) {
+         ret = PTR_ERR(slow_dev);
+-        pr_err("FOMTierFS: Error opening slow mem device %s %d", fc_info->slow_dev_name, ret);
++        pr_err("TieredMMFS: Error opening slow mem device %s %d", fc_info->slow_dev_name, ret);
+         kfree(sbi);
+         return ret;
+     }
+-    ret = fomtierfs_populate_dev_info(sbi, slow_dev, SLOW_MEM);
++    ret = tieredmmfs_populate_dev_info(sbi, slow_dev, SLOW_MEM);
+     if (ret != 0) {
+-        pr_err("FOMTierFS: Error populating slow mem device information");
++        pr_err("TieredMMFS: Error populating slow mem device information");
+         kfree(sbi);
+         return ret;
+     }
+ 
+-    inode = fomtierfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
++    inode = tieredmmfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
+     sb->s_root = d_make_root(inode);
+     if (!sb->s_root) {
+         kfree(sbi);
+@@ -1214,9 +1214,9 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
+     }
+ 
+     // Start the page migration thread
+-    sbi->demote_task = kthread_create(fomtierfs_demote_task, sbi, "FTFS Demote Thread");
++    sbi->demote_task = kthread_create(tieredmmfs_demote_task, sbi, "TMMFS Demote Thread");
+     if (!sbi->demote_task) {
+-        pr_err("FOMTierFS: Failed to create the migration task");
++        pr_err("TieredMMFS: Failed to create the migration task");
+         kfree(sbi);
+         return -ENOMEM;
+     }
+@@ -1233,43 +1233,43 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
+     return 0;
+ }
+ 
+-static int fomtierfs_get_tree(struct fs_context *fc)
++static int tieredmmfs_get_tree(struct fs_context *fc)
+ {
+-    return get_tree_bdev(fc, fomtierfs_fill_super);
++    return get_tree_bdev(fc, tieredmmfs_fill_super);
+ }
+ 
+-static void fomtierfs_free_fc(struct fs_context *fc)
++static void tieredmmfs_free_fc(struct fs_context *fc)
+ {
+-    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
++    struct tieredmmfs_context_info *fc_info = (struct tieredmmfs_context_info*)fc->fs_private;
+     kfree(fc_info->slow_dev_name);
+     kfree(fc_info);
+ }
+ 
+-static const struct fs_context_operations fomtierfs_context_ops = {
+-	.free		= fomtierfs_free_fc,
+-	.parse_param	= fomtierfs_parse_param,
+-	.get_tree	= fomtierfs_get_tree,
++static const struct fs_context_operations tieredmmfs_context_ops = {
++	.free		= tieredmmfs_free_fc,
++	.parse_param	= tieredmmfs_parse_param,
++	.get_tree	= tieredmmfs_get_tree,
+ };
+ 
+-int fomtierfs_init_fs_context(struct fs_context *fc)
++int tieredmmfs_init_fs_context(struct fs_context *fc)
+ {
+-    fc->ops = &fomtierfs_context_ops;
++    fc->ops = &tieredmmfs_context_ops;
+     // Zeroing sets fc_info->base_pages to false by default
+-    fc->fs_private = kzalloc(sizeof(struct fomtierfs_context_info), GFP_KERNEL);
++    fc->fs_private = kzalloc(sizeof(struct tieredmmfs_context_info), GFP_KERNEL);
+     return 0;
+ }
+ 
+-static void fomtierfs_kill_sb(struct super_block *sb)
++static void tieredmmfs_kill_sb(struct super_block *sb)
+ {
+     kill_litter_super(sb);
+ }
+ 
+-static struct file_system_type fomtierfs_fs_type = {
++static struct file_system_type tieredmmfs_fs_type = {
+     .owner = THIS_MODULE,
+-    .name = "FOMTierFS",
+-    .init_fs_context = fomtierfs_init_fs_context,
+-    .parameters = fomtierfs_fs_parameters,
+-    .kill_sb = fomtierfs_kill_sb,
++    .name = "TieredMMFS",
++    .init_fs_context = tieredmmfs_init_fs_context,
++    .parameters = tieredmmfs_fs_parameters,
++    .kill_sb = tieredmmfs_kill_sb,
+     .fs_flags = FS_USERNS_MOUNT | FS_REQUIRES_DEV,
+ };
+ 
+@@ -1313,9 +1313,9 @@ static ssize_t active_list_show(struct kobject *kobj,
+         struct kobj_attribute *attr, char *buf)
+ {
+     ssize_t count = 0;
+-    struct fomtierfs_dev_info *fast_dev;
+-    struct fomtierfs_dev_info *slow_dev;
+-    struct fomtierfs_page *page;
++    struct tieredmmfs_dev_info *fast_dev;
++    struct tieredmmfs_dev_info *slow_dev;
++    struct tieredmmfs_page *page;
+ 
+     if (!sysfs_sb_info) {
+         return sprintf(buf, "Not mounted");
+@@ -1406,7 +1406,7 @@ static ssize_t migrate_task_int_store(struct kobject *kobj,
+ static struct kobj_attribute migrate_task_int_attr =
+ __ATTR(migrate_task_int, 0644, migrate_task_int_show, migrate_task_int_store);
+ 
+-static struct attribute *fomtierfs_attr[] = {
++static struct attribute *tieredmmfs_attr[] = {
+     &usage_attr.attr,
+     &active_list_attr.attr,
+     &demotion_watermark_attr.attr,
+@@ -1414,28 +1414,28 @@ static struct attribute *fomtierfs_attr[] = {
+     NULL,
+ };
+ 
+-static const struct attribute_group fomtierfs_attr_group = {
+-    .attrs = fomtierfs_attr,
++static const struct attribute_group tieredmmfs_attr_group = {
++    .attrs = tieredmmfs_attr,
+ };
+ 
+ int __init init_module(void)
+ {
+-    struct kobject *fomtierfs_kobj;
++    struct kobject *tieredmmfs_kobj;
+     int err;
+ 
+-    printk(KERN_INFO "Starting FOMTierFS");
+-    register_filesystem(&fomtierfs_fs_type);
++    printk(KERN_INFO "Starting TieredMMFS");
++    register_filesystem(&tieredmmfs_fs_type);
+ 
+-    fomtierfs_kobj = kobject_create_and_add("fomtierfs", fs_kobj);
+-    if (unlikely(!fomtierfs_kobj)) {
+-        pr_err("Failed to create fomtierfs kobj\n");
++    tieredmmfs_kobj = kobject_create_and_add("tieredmmfs", fs_kobj);
++    if (unlikely(!tieredmmfs_kobj)) {
++        pr_err("Failed to create tieredmmfs kobj\n");
+         return -ENOMEM;
+     }
+ 
+-    err = sysfs_create_group(fomtierfs_kobj, &fomtierfs_attr_group);
++    err = sysfs_create_group(tieredmmfs_kobj, &tieredmmfs_attr_group);
+     if (err) {
+-        pr_err("Failed to register fomtierfs group\n");
+-        kobject_put(fomtierfs_kobj);
++        pr_err("Failed to register tieredmmfs group\n");
++        kobject_put(tieredmmfs_kobj);
+         return err;
+     }
+     return 0;
+@@ -1443,8 +1443,8 @@ int __init init_module(void)
+ 
+ void cleanup_module(void)
+ {
+-    printk(KERN_ERR "Removing FOMTierFS");
+-    unregister_filesystem(&fomtierfs_fs_type);
++    printk(KERN_ERR "Removing TieredMMFS");
++    unregister_filesystem(&tieredmmfs_fs_type);
+ }
+ 
+ MODULE_LICENSE("GPL");
+diff --git a/FOMTierFS/fs.h b/TieredMMFS/fs.h
+similarity index 67%
+rename from FOMTierFS/fs.h
+rename to TieredMMFS/fs.h
+index ca88616c3b0b..858cc6e2d556 100644
+--- a/FOMTierFS/fs.h
++++ b/TieredMMFS/fs.h
+@@ -8,20 +8,20 @@
+ #include <linux/sched.h>
+ 
+ /**
+- * FOMTierFS Lock Priority (from highest priority to lowest):
+- *  1) fomtierfs_dev_info.lock
+- *  2) fomtierfs_page.lock
++ * TieredMMFS Lock Priority (from highest priority to lowest):
++ *  1) tieredmmfs_dev_info.lock
++ *  2) tieredmmfs_page.lock
+  *      2a) Pages from the fast device
+  *      2b) Pages from the slow device
+- *  3) fomtierfs_inode_info.map_lock
++ *  3) tieredmmfs_inode_info.map_lock
+  */
+ 
+-enum fomtierfs_mem_type {
++enum tieredmmfs_mem_type {
+     FAST_MEM = 0,
+     SLOW_MEM = 1,
+ };
+ 
+-struct fomtierfs_page {
++struct tieredmmfs_page {
+     u64 page_num; // The physical page number within the device
+     u64 page_offset; // The page offset within the file
+     // If we are using huge pages, but an allocation only uses base pages,
+@@ -29,15 +29,15 @@ struct fomtierfs_page {
+     u16 num_base_pages;
+     struct inode *inode; // If the file is allocated, the inode it belongs to. Else null.
+     bool last_accessed; // Whether the accessed bit was set last time it was checked
+-    enum fomtierfs_mem_type type; // Whether this page is in fast or slow mem
++    enum tieredmmfs_mem_type type; // Whether this page is in fast or slow mem
+     spinlock_t lock; // Lock that protects the fields of this struct above it.
+-    // Linked List to connect pages in the free/active list. Protected by fomtierfs_dev_info.lock
++    // Linked List to connect pages in the free/active list. Protected by tieredmmfs_dev_info.lock
+     struct list_head list;
+-    // RB Tree keyed by page_offset used by inodes to keep track of their pages. Protected by fomtierfs_inode_info.map_lock
++    // RB Tree keyed by page_offset used by inodes to keep track of their pages. Protected by tieredmmfs_inode_info.map_lock
+     struct rb_node node;
+ };
+ 
+-struct fomtierfs_dev_info {
++struct tieredmmfs_dev_info {
+     struct block_device *bdev;
+     struct dax_device *daxdev;
+     void* virt_addr; // Kernel's virtual address to dax device
+@@ -50,8 +50,8 @@ struct fomtierfs_dev_info {
+     spinlock_t lock;
+ };
+ 
+-struct fomtierfs_sb_info {
+-    struct fomtierfs_dev_info mem[2];
++struct tieredmmfs_sb_info {
++    struct tieredmmfs_dev_info mem[2];
+     struct task_struct *demote_task;
+     // Start demotion if fast_mem has less than demotion_watermark% of memory free
+     u64 demotion_watermark;
+@@ -62,21 +62,21 @@ struct fomtierfs_sb_info {
+     unsigned char page_shift;
+ };
+ 
+-struct fomtierfs_inode_info {
++struct tieredmmfs_inode_info {
+     struct rb_root page_maps; // Mapping of offset page to dax page
+     rwlock_t map_lock;
+ };
+ 
+-struct fomtierfs_context_info {
++struct tieredmmfs_context_info {
+     char *slow_dev_name;
+     bool base_pages;
+ };
+ 
+-struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb);
++struct tieredmmfs_sb_info *FTFS_SB(struct super_block *sb);
+ 
+-struct fomtierfs_inode_info *FTFS_I(struct inode *inode);
++struct tieredmmfs_inode_info *FTFS_I(struct inode *inode);
+ 
+-struct fomtierfs_page *fomtierfs_find_page(struct rb_root *root, u64 offset);
+-bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page);
+-void fomtierfs_replace_page(struct rb_root *root, struct fomtierfs_page *new_page);
++struct tieredmmfs_page *tieredmmfs_find_page(struct rb_root *root, u64 offset);
++bool tieredmmfs_insert_page(struct rb_root *root, struct tieredmmfs_page *page);
++void tieredmmfs_replace_page(struct rb_root *root, struct tieredmmfs_page *new_page);
+ #endif // FOMTIERFS_FS_H
+diff --git a/FOMTierFS/fomtierfs_rb.c b/TieredMMFS/tieredmmfs_rb.c
+similarity index 69%
+rename from FOMTierFS/fomtierfs_rb.c
+rename to TieredMMFS/tieredmmfs_rb.c
+index b2b49451be0a..2a9ef75533ef 100644
+--- a/FOMTierFS/fomtierfs_rb.c
++++ b/TieredMMFS/tieredmmfs_rb.c
+@@ -2,18 +2,18 @@
+ 
+ /*
+  * Search a page tree for the fomtierfs_page mapped to the given a file offset.
+- * fomtierfs_inode_info->map_lock should be held in read mode.
++ * tieredmmfs_inode_info->map_lock should be held in read mode.
+  * @root The root of the rb tree to search
+  * @offset The page offset to look for
+  *
+  * Returns NULL if the page is not found and the corresponding page if found.
+  */
+-struct fomtierfs_page *fomtierfs_find_page(struct rb_root *root, u64 offset)
++struct tieredmmfs_page *tieredmmfs_find_page(struct rb_root *root, u64 offset)
+ {
+     struct rb_node *node = root->rb_node;
+ 
+     while (node) {
+-        struct fomtierfs_page *data = container_of(node, struct fomtierfs_page, node);
++        struct tieredmmfs_page *data = container_of(node, struct tieredmmfs_page, node);
+ 
+         if (offset < data->page_offset)
+             node = node->rb_left;
+@@ -28,21 +28,21 @@ struct fomtierfs_page *fomtierfs_find_page(struct rb_root *root, u64 offset)
+ 
+ /*
+  * Insert a new page into a page tree
+- * fomtierfs_inode_info->map_lock should be held in write mode.
++ * tieredmmfs_inode_info->map_lock should be held in write mode.
+  * @root The root of the rb tree to insert into
+  * @page The page to insert into the tree
+  *
+  * Returns true if the insert was successful, and false if a page at the same
+  * offset already exists.
+  */
+-bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page)
++bool tieredmmfs_insert_page(struct rb_root *root, struct tieredmmfs_page *page)
+ {
+     struct rb_node **new = &(root->rb_node);
+     struct rb_node *parent = NULL;
+ 
+     // Find place to insert new node
+     while (*new) {
+-        struct fomtierfs_page *this = container_of(*new, struct fomtierfs_page, node);
++        struct tieredmmfs_page *this = container_of(*new, struct tieredmmfs_page, node);
+ 
+         parent = *new;
+ 
+@@ -64,16 +64,16 @@ bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page)
+ /*
+  * Replaces the node currently in the tree at new_page->offset.
+  * If such a page does not already exist in the tree, BUG out.
+- * The fomtierfs_inode_info.map_lock should be held in write mode before this
++ * The tieredmmfs_inode_info.map_lock should be held in write mode before this
+  * function is called.
+  * @root The root of the rb tree to modify
+  * @new_page The page that will replace the new page
+  */
+-void fomtierfs_replace_page(struct rb_root *root, struct fomtierfs_page *new_page)
++void tieredmmfs_replace_page(struct rb_root *root, struct tieredmmfs_page *new_page)
+ {
+-    struct fomtierfs_page *old_page;
++    struct tieredmmfs_page *old_page;
+ 
+-    old_page = fomtierfs_find_page(root, new_page->page_offset);
++    old_page = tieredmmfs_find_page(root, new_page->page_offset);
+     if (!old_page) {
+         BUG();
+     }
+diff --git a/block/blk-lib.c b/block/blk-lib.c
+index 61ecd78f7369..caf4f3cca168 100644
+--- a/block/blk-lib.c
++++ b/block/blk-lib.c
+@@ -249,7 +249,7 @@ EXPORT_SYMBOL(__blkdev_issue_zeroout);
+  *  writing zeroes to the device.  See __blkdev_issue_zeroout() for the
+  *  valid values for %flags.
+  */
+-extern int fom_pmem_write_zeroes;
++extern int fbmm_pmem_write_zeroes;
+ int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
+ 		sector_t nr_sects, gfp_t gfp_mask, unsigned flags)
+ {
+@@ -266,7 +266,7 @@ int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
+ retry:
+ 	bio = NULL;
+ 	blk_start_plug(&plug);
+-	if (try_write_zeroes && fom_pmem_write_zeroes) {
++	if (try_write_zeroes && fbmm_pmem_write_zeroes) {
+ 		ret = __blkdev_issue_write_zeroes(bdev, sector, nr_sects,
+ 						  gfp_mask, &bio, flags);
+ 	} else if (!(flags & BLKDEV_ZERO_NOFALLBACK)) {
+diff --git a/fs/dax.c b/fs/dax.c
+index 552f925b131d..b6d6739c3f17 100644
+--- a/fs/dax.c
++++ b/fs/dax.c
+@@ -1707,7 +1707,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
+ 	return vmf_insert_mixed(vmf->vma, vmf->address, pfn);
+ }
+ 
+-extern int fom_dax_pte_fault_size;
++extern int fbmm_dax_pte_fault_size;
+ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
+ 			       int *iomap_errp, const struct iomap_ops *ops)
+ {
+@@ -1716,7 +1716,7 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
+ 	struct iomap_iter iter = {
+ 		.inode		= mapping->host,
+ 		.pos		= (loff_t)vmf->pgoff << PAGE_SHIFT,
+-		.len		= fom_dax_pte_fault_size * PAGE_SIZE,
++		.len		= fbmm_dax_pte_fault_size * PAGE_SIZE,
+ 		.flags		= IOMAP_DAX | IOMAP_FAULT,
+ 	};
+ 	vm_fault_t ret = 0;
+diff --git a/fs/ext4/extents.c b/fs/ext4/extents.c
+index 1ad29f70b1ff..f82d08604bbe 100644
+--- a/fs/ext4/extents.c
++++ b/fs/ext4/extents.c
+@@ -4082,7 +4082,7 @@ static int get_implied_cluster_alloc(struct super_block *sb,
+  *
+  * return < 0, error case.
+  */
+-#include <linux/file_only_mem.h>
++//#include <linux/file_based_mm.h>
+ int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
+ 			struct ext4_map_blocks *map, int flags)
+ {
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index 9d642de9ec36..e18263f18cd8 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -6071,7 +6071,7 @@ int ext4_expand_extra_isize(struct inode *inode,
+  * Whenever the user wants stuff synced (sys_sync, sys_msync, sys_fsync)
+  * we start and wait on commits.
+  */
+-extern int fom_mark_inode_dirty;
++extern int fbmm_mark_inode_dirty;
+ int __ext4_mark_inode_dirty(handle_t *handle, struct inode *inode,
+ 				const char *func, unsigned int line)
+ {
+@@ -6079,7 +6079,7 @@ int __ext4_mark_inode_dirty(handle_t *handle, struct inode *inode,
+ 	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
+ 	int err;
+ 
+-	if (ext4_should_enable_dax(inode) && !fom_mark_inode_dirty) {
++	if (ext4_should_enable_dax(inode) && !fbmm_mark_inode_dirty) {
+ 		return 0;
+ 	}
+ 
+diff --git a/include/linux/file_based_mm.h b/include/linux/file_based_mm.h
+new file mode 100644
+index 000000000000..bfd9d6365327
+--- /dev/null
++++ b/include/linux/file_based_mm.h
+@@ -0,0 +1,39 @@
++#ifndef _FILE_BASED_MM_H_
++#define _FILE_BASED_MM_H_
++
++#include <linux/types.h>
++#include <linux/fs.h>
++
++#ifdef CONFIG_FILE_BASED_MM
++
++bool use_file_based_mm(pid_t pid);
++
++struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags);
++void fbmm_register_file(pid_t pid, struct file *f, unsigned long start,
++		unsigned long len);
++int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len);
++void fbmm_check_exiting_proc(pid_t pid);
++
++#else //CONFIG_FILE_BASED_MM
++
++inline bool use_file_based_mm(pid_t pid) {
++	return false;
++}
++
++inline struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
++	return NULL;
++}
++
++inline void fbmm_register_file(pid_t pid, struct file *f, unsigned long start,
++		unsigned long len)
++{}
++
++inline int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
++	return 0;
++}
++
++inline void fbmm_check_exiting_proc(pid_t pid) {}
++
++#endif //CONFIG_FILE_BASED_MM
++
++#endif //__FILE_BASED_MM_H
+diff --git a/include/linux/file_only_mem.h b/include/linux/file_only_mem.h
+deleted file mode 100644
+index 3732d186f729..000000000000
+--- a/include/linux/file_only_mem.h
++++ /dev/null
+@@ -1,39 +0,0 @@
+-#ifndef _FILE_ONLY_MEM_H_
+-#define _FILE_ONLY_MEM_H_
+-
+-#include <linux/types.h>
+-#include <linux/fs.h>
+-
+-#ifdef CONFIG_FILE_ONLY_MEM
+-
+-bool use_file_only_mem(pid_t pid);
+-
+-struct file *fom_create_new_file(unsigned long len,	unsigned long prot, int flags);
+-void fom_register_file(pid_t pid, struct file *f, unsigned long start,
+-		unsigned long len);
+-int fom_munmap(pid_t pid, unsigned long start, unsigned long len);
+-void fom_check_exiting_proc(pid_t pid);
+-
+-#else //CONFIG_FILE_ONLY_MEM
+-
+-inline bool use_file_only_mem(pid_t pid) {
+-	return false;
+-}
+-
+-inline struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flags) {
+-	return NULL;
+-}
+-
+-inline void fom_register_file(pid_t pid, struct file *f, unsigned long start,
+-		unsigned long len)
+-{}
+-
+-inline int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+-	return 0;
+-}
+-
+-inline void fom_check_exiting_proc(pid_t pid) {}
+-
+-#endif //CONFIG_FILE_ONLY_MEM
+-
+-#endif //__FILE_ONLY_MEM_H
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 2a5b6999a045..0448cccecfdb 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -68,7 +68,7 @@
+ #include <linux/kprobes.h>
+ #include <linux/rethook.h>
+ #include <linux/sysfs.h>
+-#include <linux/file_only_mem.h>
++#include <linux/file_based_mm.h>
+ 
+ #include <linux/uaccess.h>
+ #include <asm/unistd.h>
+@@ -817,7 +817,7 @@ void __noreturn do_exit(long code)
+ 	// Bijan: When a process exits, check if we should delete its FOM files
+ 	// We only care if the main thread exits, so check against tsk->pid
+ 	// instead of tsk->tgid
+-	fom_check_exiting_proc(tsk->pid);
++	fbmm_check_exiting_proc(tsk->pid);
+ 
+ 	kcov_task_exit(tsk);
+ 	kmsan_task_exit(tsk);
+diff --git a/mm/Kconfig b/mm/Kconfig
+index c3e700d607af..de3efab6db44 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -374,11 +374,11 @@ config MMAP_ALLOW_UNINITIALIZED
+ 
+ 	  See Documentation/admin-guide/mm/nommu-mmap.rst for more information.
+ 
+-config FILE_ONLY_MEM
+-	bool "File Only Memory"
++config FILE_BASED_MM
++	bool "File Based Memory Management"
+ 	depends on FS_DAX
+ 	help
+-	  This option enables file only memory
++	  This option enables file based memory management
+ 
+ config SELECT_MEMORY_MODEL
+ 	def_bool y
+diff --git a/mm/Makefile b/mm/Makefile
+index b611e37fd12a..016178a9f62d 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -138,4 +138,4 @@ obj-$(CONFIG_IO_MAPPING) += io-mapping.o
+ obj-$(CONFIG_HAVE_BOOTMEM_INFO_NODE) += bootmem_info.o
+ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
+ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
+-obj-$(CONFIG_FILE_ONLY_MEM) += file_only_mem.o
++obj-$(CONFIG_FILE_BASED_MM) += file_based_mm.o
+diff --git a/mm/file_only_mem.c b/mm/file_based_mm.c
+similarity index 61%
+rename from mm/file_only_mem.c
+rename to mm/file_based_mm.c
+index f8e53a9c4b9e..71fae3130fc8 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_based_mm.c
+@@ -1,5 +1,5 @@
+ #include <linux/types.h>
+-#include <linux/file_only_mem.h>
++#include <linux/file_based_mm.h>
+ #include <linux/sysfs.h>
+ #include <linux/kobject.h>
+ #include <linux/namei.h>
+@@ -10,28 +10,28 @@
+ #include <linux/falloc.h>
+ #include <linux/timekeeping.h>
+ 
+-enum file_only_mem_state {
+-	FOM_OFF = 0,
+-	FOM_SINGLE_PROC = 1,
+-	FOM_ALL = 2
++enum file_based_mm_state {
++	FBMM_OFF = 0,
++	FBMM_SINGLE_PROC = 1,
++	FBMM_ALL = 2
+ };
+ 
+-struct fom_file {
++struct fbmm_file {
+ 	struct file *f;
+ 	unsigned long original_start; // Used to compute the offset for fallocate
+ 	int count;
+ };
+ 
+ // Start is inclusive, end is exclusive
+-struct fom_mapping {
++struct fbmm_mapping {
+ 	u64 start;
+ 	u64 end;
+-	struct fom_file *file;
++	struct fbmm_file *file;
+ 
+ 	struct rb_node node;
+ };
+ 
+-struct fom_proc {
++struct fbmm_proc {
+ 	pid_t pid;
+ 	struct rb_root mappings;
+ 
+@@ -39,27 +39,27 @@ struct fom_proc {
+ };
+ 
+ 
+-static enum file_only_mem_state fom_state = FOM_OFF;
++static enum file_based_mm_state fbmm_state = FBMM_OFF;
+ static pid_t cur_proc = 0;
+ static char file_dir[PATH_MAX];
+-static struct rb_root fom_procs = RB_ROOT;
+-static DECLARE_RWSEM(fom_procs_sem);
++static struct rb_root fbmm_procs = RB_ROOT;
++static DECLARE_RWSEM(fbmm_procs_sem);
+ 
+ static ktime_t file_create_time = 0;
+ static u64 num_file_creates = 0;
+ static ktime_t file_register_time = 0;
+ static u64 num_file_registers = 0;
+ 
+-static int fom_prealloc_map_populate = 1;
++static int fbmm_prealloc_map_populate = 1;
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+-// struct fom_proc functions
++// struct fbmm_proc functions
+ 
+-static struct fom_proc *get_fom_proc(pid_t pid) {
+-	struct rb_node *node = fom_procs.rb_node;
++static struct fbmm_proc *get_fbmm_proc(pid_t pid) {
++	struct rb_node *node = fbmm_procs.rb_node;
+ 
+ 	while (node) {
+-		struct fom_proc *proc = rb_entry(node, struct fom_proc, node);
++		struct fbmm_proc *proc = rb_entry(node, struct fbmm_proc, node);
+ 
+ 		if (pid < proc->pid)
+ 			node = node->rb_left;
+@@ -72,12 +72,12 @@ static struct fom_proc *get_fom_proc(pid_t pid) {
+ 	return NULL;
+ }
+ 
+-static void insert_new_proc(struct fom_proc *new_proc) {
+-	struct rb_node **new = &(fom_procs.rb_node);
++static void insert_new_proc(struct fbmm_proc *new_proc) {
++	struct rb_node **new = &(fbmm_procs.rb_node);
+ 	struct rb_node *parent = NULL;
+ 
+ 	while (*new) {
+-		struct fom_proc *cur = rb_entry(*new, struct fom_proc, node);
++		struct fbmm_proc *cur = rb_entry(*new, struct fbmm_proc, node);
+ 
+ 		parent = *new;
+ 		if (new_proc->pid < cur->pid)
+@@ -91,18 +91,18 @@ static void insert_new_proc(struct fom_proc *new_proc) {
+ 	}
+ 
+ 	rb_link_node(&new_proc->node, parent, new);
+-	rb_insert_color(&new_proc->node, &fom_procs);
++	rb_insert_color(&new_proc->node, &fbmm_procs);
+ }
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+-// struct fom_mapping functions
++// struct fbmm_mapping functions
+ 
+-static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_map) {
++static void insert_new_mapping(struct fbmm_proc *proc, struct fbmm_mapping *new_map) {
+ 	struct rb_node **new = &(proc->mappings.rb_node);
+ 	struct rb_node *parent = NULL;
+ 
+ 	while (*new) {
+-		struct fom_mapping *cur = rb_entry(*new, struct fom_mapping, node);
++		struct fbmm_mapping *cur = rb_entry(*new, struct fbmm_mapping, node);
+ 
+ 		// Check for an overlap
+ 		if ((new_map->start >= cur->start && new_map->start < cur->end) ||
+@@ -128,12 +128,12 @@ static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_ma
+ 
+ // Returns the first mapping in proc where addr < mapping->end, NULL if none exists.
+ // Mostly taken from find_vma
+-static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long addr) {
+-	struct fom_mapping *mapping = NULL;
++static struct fbmm_mapping *find_mapping(struct fbmm_proc *proc, unsigned long addr) {
++	struct fbmm_mapping *mapping = NULL;
+ 	struct rb_node *node = proc->mappings.rb_node;
+ 
+ 	while (node) {
+-		struct fom_mapping *tmp = rb_entry(node, struct fom_mapping, node);
++		struct fbmm_mapping *tmp = rb_entry(node, struct fbmm_mapping, node);
+ 
+ 		if (tmp->end > addr) {
+ 			mapping = tmp;
+@@ -152,7 +152,7 @@ static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long add
+ // Helper functions
+ 
+ // Most of this is taken from do_sys_truncate in fs/open.c
+-static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
++static int truncate_fbmm_file(struct file *f, unsigned long len, int flags) {
+ 	struct inode *inode;
+ 	struct dentry *dentry;
+ 	int error;
+@@ -160,7 +160,7 @@ static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
+ 	dentry = f->f_path.dentry;
+ 	inode = dentry->d_inode;
+ 
+-	if ((flags & MAP_POPULATE) && fom_prealloc_map_populate) {
++	if ((flags & MAP_POPULATE) && fbmm_prealloc_map_populate) {
+ 		error = vfs_truncate(&f->f_path, len);
+ 		if (!error)
+ 			error = vfs_fallocate(f, 0, 0, len);
+@@ -178,7 +178,7 @@ static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
+ 	return error;
+ }
+ 
+-static void drop_fom_file(struct fom_mapping *map) {
++static void drop_fbmm_file(struct fbmm_mapping *map) {
+ 	map->file->count--;
+ 	if (map->file->count <= 0) {
+ 		filp_close(map->file->f, current->files);
+@@ -191,12 +191,12 @@ static void drop_fom_file(struct fom_mapping *map) {
+ ///////////////////////////////////////////////////////////////////////////////
+ // External API functions
+ 
+-bool use_file_only_mem(pid_t pid) {
+-	if (fom_state == FOM_OFF) {
++bool use_file_based_mm(pid_t pid) {
++	if (fbmm_state == FBMM_OFF) {
+ 		return false;
+-	} if (fom_state == FOM_SINGLE_PROC) {
++	} if (fbmm_state == FBMM_SINGLE_PROC) {
+ 		return pid == cur_proc;
+-	} else if (fom_state == FOM_ALL) {
++	} else if (fbmm_state == FBMM_ALL) {
+ 		return true;
+ 	}
+ 
+@@ -204,7 +204,7 @@ bool use_file_only_mem(pid_t pid) {
+ 	return false;
+ }
+ 
+-struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flags) {
++struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
+ 	struct file *f;
+ 	int open_flags = O_EXCL | O_TMPFILE;
+ 	umode_t open_mode = 0;
+@@ -231,7 +231,7 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flag
+ 		return NULL;
+ 
+ 	// Set the file to the correct size
+-	ret = truncate_fom_file(f, len, flags);
++	ret = truncate_fbmm_file(f, len, flags);
+ 	if (ret) {
+ 		filp_close(f, current->files);
+ 		return NULL;
+@@ -243,25 +243,25 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flag
+ 	return f;
+ }
+ 
+-void fom_register_file(pid_t pid, struct file *f,
++void fbmm_register_file(pid_t pid, struct file *f,
+ 		unsigned long start, unsigned long len)
+ {
+-	struct fom_proc *proc;
+-	struct fom_mapping *mapping = NULL;
+-	struct fom_file *file = NULL;
++	struct fbmm_proc *proc;
++	struct fbmm_mapping *mapping = NULL;
++	struct fbmm_file *file = NULL;
+ 	bool new_proc = false;
+ 	ktime_t start_time = ktime_get_ns();
+ 
+-	down_read(&fom_procs_sem);
+-	proc = get_fom_proc(pid);
+-	up_read(&fom_procs_sem);
++	down_read(&fbmm_procs_sem);
++	proc = get_fbmm_proc(pid);
++	up_read(&fbmm_procs_sem);
+ 	// Create the proc data structure if it does not already exist
+ 	if (!proc) {
+ 		new_proc = true;
+ 
+-		proc = vmalloc(sizeof(struct fom_proc));
++		proc = vmalloc(sizeof(struct fbmm_proc));
+ 		if (!proc) {
+-			pr_err("fom_create_new_file: not enough memory for proc\n");
++			pr_err("fbmm_create_new_file: not enough memory for proc\n");
+ 			return;
+ 		}
+ 
+@@ -269,7 +269,7 @@ void fom_register_file(pid_t pid, struct file *f,
+ 		proc->mappings = RB_ROOT;
+ 	}
+ 
+-	file = vmalloc(sizeof(struct fom_file));
++	file = vmalloc(sizeof(struct fbmm_file));
+ 	if (!file)
+ 		goto err;
+ 
+@@ -280,23 +280,23 @@ void fom_register_file(pid_t pid, struct file *f,
+ 	file->original_start = start;
+ 
+ 	// Create the new mapping
+-	mapping = vmalloc(sizeof(struct fom_mapping));
++	mapping = vmalloc(sizeof(struct fbmm_mapping));
+ 	if (!mapping) {
+-		pr_err("fom_create_new_file: not enough memory for mapping\n");
++		pr_err("fbmm_create_new_file: not enough memory for mapping\n");
+ 		goto err;
+ 	}
+ 	mapping->start = start;
+ 	mapping->end = start + len;
+ 	mapping->file = file;
+ 
+-	down_write(&fom_procs_sem);
++	down_write(&fbmm_procs_sem);
+ 
+ 	insert_new_mapping(proc, mapping);
+ 
+-	// If we created a new fom_proc, add it to the rb_tree
++	// If we created a new fbmm_proc, add it to the rb_tree
+ 	if (new_proc)
+ 		insert_new_proc(proc);
+-	up_write(&fom_procs_sem);
++	up_write(&fbmm_procs_sem);
+ 
+ 	file_register_time += ktime_get_ns() - start_time;
+ 	num_file_registers++;
+@@ -309,18 +309,18 @@ void fom_register_file(pid_t pid, struct file *f,
+ 		vfree(file);
+ }
+ 
+-int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+-	struct fom_proc *proc = NULL;
+-	struct fom_mapping *old_mapping = NULL;
++int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
++	struct fbmm_proc *proc = NULL;
++	struct fbmm_mapping *old_mapping = NULL;
+ 	unsigned long end = start + len;
+ 	unsigned long falloc_offset, falloc_len;
+ 	struct file *falloc_file = NULL;
+ 	bool do_falloc = false;
+ 	int ret = 0;
+ 
+-	down_read(&fom_procs_sem);
+-	proc = get_fom_proc(pid);
+-	up_read(&fom_procs_sem);
++	down_read(&fbmm_procs_sem);
++	proc = get_fbmm_proc(pid);
++	up_read(&fbmm_procs_sem);
+ 
+ 	if (!proc)
+ 		return 0;
+@@ -332,21 +332,21 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 
+ 		// Finds the first mapping where start < mapping->end, so we have to
+ 		// check if old_mapping is actually within the range
+-		down_read(&fom_procs_sem);
++		down_read(&fbmm_procs_sem);
+ 		old_mapping = find_mapping(proc, start);
+ 		if (!old_mapping || end <= old_mapping->start)
+ 			goto exit_locked;
+ 
+ 		next_start = old_mapping->end;
+-		up_read(&fom_procs_sem);
++		up_read(&fbmm_procs_sem);
+ 
+ 		// If the unmap range entirely contains the mapping, we can simply delete it
+ 		if (start <= old_mapping->start && old_mapping->end <= end) {
+ 			// First, we have to grab a write lock
+-			down_write(&fom_procs_sem);
++			down_write(&fbmm_procs_sem);
+ 
+ 			rb_erase(&old_mapping->node, &proc->mappings);
+-			drop_fom_file(old_mapping);
++			drop_fbmm_file(old_mapping);
+ 
+ 			// If old_mapping->file is null, it has been deleted.
+ 			// Otherwise, we should punch a hole in this mapping
+@@ -360,11 +360,11 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 
+ 			vfree(old_mapping);
+ 
+-			up_write(&fom_procs_sem);
++			up_write(&fbmm_procs_sem);
+ 		}
+ 		// If the unmap range takes only the end of the mapping, truncate the file
+ 		else if (start < old_mapping->end && old_mapping->end <= end) {
+-			down_write(&fom_procs_sem);
++			down_write(&fbmm_procs_sem);
+ 
+ 			falloc_offset = start - old_mapping->file->original_start;
+ 			falloc_len = old_mapping->end - start;
+@@ -372,12 +372,12 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 			falloc_file = old_mapping->file->f;
+ 			do_falloc = true;
+ 
+-			up_write(&fom_procs_sem);
++			up_write(&fbmm_procs_sem);
+ 		}
+ 		// If the unmap range trims off only the beginning of the mapping,
+ 		// deallocate the beginning
+ 		else if (start <= old_mapping->start && old_mapping->start < end) {
+-			down_write(&fom_procs_sem);
++			down_write(&fbmm_procs_sem);
+ 
+ 			falloc_offset = old_mapping->start - old_mapping->file->original_start;
+ 			falloc_len = end - old_mapping->start;
+@@ -385,23 +385,23 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 			falloc_file = old_mapping->file->f;
+ 			do_falloc = true;
+ 
+-			up_write(&fom_procs_sem);
++			up_write(&fbmm_procs_sem);
+ 		}
+ 		// If the unmap range is entirely within a mapping, poke a hole
+ 		// in the middle of the file and create a new mapping to represent
+ 		// the split
+ 		else if (old_mapping->start < start && end < old_mapping->end) {
+-			struct fom_mapping *new_mapping = vmalloc(sizeof(struct fom_mapping));
++			struct fbmm_mapping *new_mapping = vmalloc(sizeof(struct fbmm_mapping));
+ 
+ 			if (!new_mapping) {
+-				pr_err("fom_munmap: can't allocate new fom_mapping\n");
++				pr_err("fbmm_munmap: can't allocate new fbmm_mapping\n");
+ 				return -ENOMEM;
+ 			}
+ 
+ 			new_mapping->start = end;
+ 			new_mapping->end = old_mapping->end;
+ 
+-			down_write(&fom_procs_sem);
++			down_write(&fbmm_procs_sem);
+ 			old_mapping->end = start;
+ 
+ 			new_mapping->file = old_mapping->file;
+@@ -413,7 +413,7 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 			falloc_len = end - start;
+ 			falloc_file = old_mapping->file->f;
+ 			do_falloc = true;
+-			up_write(&fom_procs_sem);
++			up_write(&fbmm_procs_sem);
+ 		}
+ 
+ 		if (do_falloc) {
+@@ -427,31 +427,31 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 
+ 	return ret;
+ exit_locked:
+-	up_read(&fom_procs_sem);
++	up_read(&fbmm_procs_sem);
+ 	return ret;
+ }
+ 
+-void fom_check_exiting_proc(pid_t pid) {
+-	struct fom_proc *proc;
++void fbmm_check_exiting_proc(pid_t pid) {
++	struct fbmm_proc *proc;
+ 	struct rb_node *node;
+ 
+-	down_read(&fom_procs_sem);
+-	proc = get_fom_proc(pid);
+-	up_read(&fom_procs_sem);
++	down_read(&fbmm_procs_sem);
++	proc = get_fbmm_proc(pid);
++	up_read(&fbmm_procs_sem);
+ 
+ 	if (!proc)
+ 		return;
+ 
+-	down_write(&fom_procs_sem);
++	down_write(&fbmm_procs_sem);
+ 
+ 	// First, free the mappings tree
+ 	node = proc->mappings.rb_node;
+ 	while (node) {
+-		struct fom_mapping *map = rb_entry(node, struct fom_mapping, node);
++		struct fbmm_mapping *map = rb_entry(node, struct fbmm_mapping, node);
+ 		rb_erase(node, &proc->mappings);
+ 		node = proc->mappings.rb_node;
+ 
+-		drop_fom_file(map);
++		drop_fbmm_file(map);
+ 
+ 		vfree(map);
+ 	}
+@@ -459,21 +459,21 @@ void fom_check_exiting_proc(pid_t pid) {
+ 	// Now, remove the proc from the procs tree and free it
+ 	// TODO: I might be able to remove the proc from the proc tree first,
+ 	// then free everything else without holding any locks...
+-	rb_erase(&proc->node, &fom_procs);
++	rb_erase(&proc->node, &fbmm_procs);
+ 	vfree(proc);
+ 
+-	up_write(&fom_procs_sem);
++	up_write(&fbmm_procs_sem);
+ }
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ // sysfs files
+-static ssize_t fom_state_show(struct kobject *kobj,
++static ssize_t fbmm_state_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "%d\n", fom_state);
++	return sprintf(buf, "%d\n", fbmm_state);
+ }
+ 
+-static ssize_t fom_state_store(struct kobject *kobj,
++static ssize_t fbmm_state_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -483,26 +483,26 @@ static ssize_t fom_state_store(struct kobject *kobj,
+ 	ret = kstrtoint(buf, 0, &state);
+ 
+ 	if (ret != 0) {
+-		fom_state = FOM_OFF;
++		fbmm_state = FBMM_OFF;
+ 		return ret;
+-	} else if (state >= FOM_OFF && state <= FOM_ALL) {
+-		fom_state = state;
++	} else if (state >= FBMM_OFF && state <= FBMM_ALL) {
++		fbmm_state = state;
+ 		return count;
+ 	} else {
+-		fom_state = FOM_OFF;
++		fbmm_state = FBMM_OFF;
+ 		return -EINVAL;
+ 	}
+ }
+-static struct kobj_attribute fom_state_attribute =
+-__ATTR(state, 0644, fom_state_show, fom_state_store);
++static struct kobj_attribute fbmm_state_attribute =
++__ATTR(state, 0644, fbmm_state_show, fbmm_state_store);
+ 
+-static ssize_t fom_pid_show(struct kobject *kobj,
++static ssize_t fbmm_pid_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+ 	return sprintf(buf, "%d\n", cur_proc);
+ }
+ 
+-static ssize_t fom_pid_store(struct kobject *kobj,
++static ssize_t fbmm_pid_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -520,16 +520,16 @@ static ssize_t fom_pid_store(struct kobject *kobj,
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_pid_attribute =
+-__ATTR(pid, 0644, fom_pid_show, fom_pid_store);
++static struct kobj_attribute fbmm_pid_attribute =
++__ATTR(pid, 0644, fbmm_pid_show, fbmm_pid_store);
+ 
+-static ssize_t fom_dir_show(struct kobject *kobj,
++static ssize_t fbmm_dir_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+ 	return sprintf(buf, "%s\n", file_dir);
+ }
+ 
+-static ssize_t fom_dir_store(struct kobject *kobj,
++static ssize_t fbmm_dir_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -558,10 +558,10 @@ static ssize_t fom_dir_store(struct kobject *kobj,
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_file_dir_attribute =
+-__ATTR(file_dir, 0644, fom_dir_show, fom_dir_store);
++static struct kobj_attribute fbmm_file_dir_attribute =
++__ATTR(file_dir, 0644, fbmm_dir_show, fbmm_dir_store);
+ 
+-static ssize_t fom_stats_show(struct kobject *kobj,
++static ssize_t fbmm_stats_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+     u64 avg_create_time = 0;
+@@ -583,7 +583,7 @@ static ssize_t fom_stats_show(struct kobject *kobj,
+     return count;
+ }
+ 
+-static ssize_t fom_stats_store(struct kobject *kobj,
++static ssize_t fbmm_stats_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -593,17 +593,17 @@ static ssize_t fom_stats_store(struct kobject *kobj,
+ 	num_file_registers = 0;
+ 	return count;
+ }
+-static struct kobj_attribute fom_stats_attribute =
+-__ATTR(stats, 0644, fom_stats_show, fom_stats_store);
++static struct kobj_attribute fbmm_stats_attribute =
++__ATTR(stats, 0644, fbmm_stats_show, fbmm_stats_store);
+ 
+-int fom_dax_pte_fault_size = 1;
+-static ssize_t fom_dax_pte_fault_size_show(struct kobject *kobj,
++int fbmm_dax_pte_fault_size = 1;
++static ssize_t fbmm_dax_pte_fault_size_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "%d\n", fom_dax_pte_fault_size);
++	return sprintf(buf, "%d\n", fbmm_dax_pte_fault_size);
+ }
+ 
+-static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
++static ssize_t fbmm_dax_pte_fault_size_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -613,19 +613,19 @@ static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
+ 	ret = kstrtoint(buf, 0, &fault_size);
+ 
+ 	if (ret != 0) {
+-		fom_dax_pte_fault_size = 1;
++		fbmm_dax_pte_fault_size = 1;
+ 		return ret;
+ 	}
+ 
+ 	if (fault_size > 0)
+-		fom_dax_pte_fault_size = fault_size;
++		fbmm_dax_pte_fault_size = fault_size;
+ 	else
+-		fom_dax_pte_fault_size = 1;
++		fbmm_dax_pte_fault_size = 1;
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_dax_pte_fault_size_attribute =
+-__ATTR(pte_fault_size, 0644, fom_dax_pte_fault_size_show, fom_dax_pte_fault_size_store);
++static struct kobj_attribute fbmm_dax_pte_fault_size_attribute =
++__ATTR(pte_fault_size, 0644, fbmm_dax_pte_fault_size_show, fbmm_dax_pte_fault_size_store);
+ 
+ int nt_huge_page_zero = 1;
+ static ssize_t nt_huge_page_zero_show(struct kobject *kobj,
+@@ -658,14 +658,14 @@ static ssize_t nt_huge_page_zero_store(struct kobject *kobj,
+ static struct kobj_attribute nt_huge_page_zero_attribute =
+ __ATTR(nt_huge_page_zero, 0644, nt_huge_page_zero_show, nt_huge_page_zero_store);
+ 
+-int fom_follow_page_mask_fix = 1;
+-static ssize_t fom_follow_page_mask_fix_show(struct kobject *kobj,
++int fbmm_follow_page_mask_fix = 1;
++static ssize_t fbmm_follow_page_mask_fix_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "%d\n", fom_follow_page_mask_fix);
++	return sprintf(buf, "%d\n", fbmm_follow_page_mask_fix);
+ }
+ 
+-static ssize_t fom_follow_page_mask_fix_store(struct kobject *kobj,
++static ssize_t fbmm_follow_page_mask_fix_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -675,28 +675,28 @@ static ssize_t fom_follow_page_mask_fix_store(struct kobject *kobj,
+ 	ret = kstrtoint(buf, 0, &val);
+ 
+ 	if (ret != 0) {
+-		fom_follow_page_mask_fix = 1;
++		fbmm_follow_page_mask_fix = 1;
+ 		return ret;
+ 	}
+ 
+ 	if (val == 0)
+-		fom_follow_page_mask_fix = 0;
++		fbmm_follow_page_mask_fix = 0;
+ 	else
+-		fom_follow_page_mask_fix = 1;
++		fbmm_follow_page_mask_fix = 1;
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_follow_page_mask_fix_attribute =
+-__ATTR(follow_page_mask_fix, 0644, fom_follow_page_mask_fix_show, fom_follow_page_mask_fix_store);
++static struct kobj_attribute fbmm_follow_page_mask_fix_attribute =
++__ATTR(follow_page_mask_fix, 0644, fbmm_follow_page_mask_fix_show, fbmm_follow_page_mask_fix_store);
+ 
+-int fom_pmem_write_zeroes = 1;
+-static ssize_t fom_pmem_write_zeroes_show(struct kobject *kobj,
++int fbmm_pmem_write_zeroes = 1;
++static ssize_t fbmm_pmem_write_zeroes_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "%d\n", fom_pmem_write_zeroes);
++	return sprintf(buf, "%d\n", fbmm_pmem_write_zeroes);
+ }
+ 
+-static ssize_t fom_pmem_write_zeroes_store(struct kobject *kobj,
++static ssize_t fbmm_pmem_write_zeroes_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -706,28 +706,28 @@ static ssize_t fom_pmem_write_zeroes_store(struct kobject *kobj,
+ 	ret = kstrtoint(buf, 0, &val);
+ 
+ 	if (ret != 0) {
+-		fom_pmem_write_zeroes = 1;
++		fbmm_pmem_write_zeroes = 1;
+ 		return ret;
+ 	}
+ 
+ 	if (val == 0)
+-		fom_pmem_write_zeroes = 0;
++		fbmm_pmem_write_zeroes = 0;
+ 	else
+-		fom_pmem_write_zeroes = 1;
++		fbmm_pmem_write_zeroes = 1;
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_pmem_write_zeroes_attribute =
+-__ATTR(pmem_write_zeroes, 0644, fom_pmem_write_zeroes_show, fom_pmem_write_zeroes_store);
++static struct kobj_attribute fbmm_pmem_write_zeroes_attribute =
++__ATTR(pmem_write_zeroes, 0644, fbmm_pmem_write_zeroes_show, fbmm_pmem_write_zeroes_store);
+ 
+-int fom_track_pfn_insert = 0;
+-static ssize_t fom_track_pfn_insert_show(struct kobject *kobj,
++int fbmm_track_pfn_insert = 0;
++static ssize_t fbmm_track_pfn_insert_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "%d\n", fom_track_pfn_insert);
++	return sprintf(buf, "%d\n", fbmm_track_pfn_insert);
+ }
+ 
+-static ssize_t fom_track_pfn_insert_store(struct kobject *kobj,
++static ssize_t fbmm_track_pfn_insert_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -737,28 +737,28 @@ static ssize_t fom_track_pfn_insert_store(struct kobject *kobj,
+ 	ret = kstrtoint(buf, 0, &val);
+ 
+ 	if (ret != 0) {
+-		fom_track_pfn_insert = 0;
++		fbmm_track_pfn_insert = 0;
+ 		return ret;
+ 	}
+ 
+ 	if (val == 0)
+-		fom_track_pfn_insert = 0;
++		fbmm_track_pfn_insert = 0;
+ 	else
+-		fom_track_pfn_insert = 1;
++		fbmm_track_pfn_insert = 1;
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_track_pfn_insert_attribute =
+-__ATTR(track_pfn_insert, 0644, fom_track_pfn_insert_show, fom_track_pfn_insert_store);
++static struct kobj_attribute fbmm_track_pfn_insert_attribute =
++__ATTR(track_pfn_insert, 0644, fbmm_track_pfn_insert_show, fbmm_track_pfn_insert_store);
+ 
+-int fom_mark_inode_dirty = 0;
+-static ssize_t fom_mark_inode_dirty_show(struct kobject *kobj,
++int fbmm_mark_inode_dirty = 0;
++static ssize_t fbmm_mark_inode_dirty_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "%d\n", fom_mark_inode_dirty);
++	return sprintf(buf, "%d\n", fbmm_mark_inode_dirty);
+ }
+ 
+-static ssize_t fom_mark_inode_dirty_store(struct kobject *kobj,
++static ssize_t fbmm_mark_inode_dirty_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -768,27 +768,27 @@ static ssize_t fom_mark_inode_dirty_store(struct kobject *kobj,
+ 	ret = kstrtoint(buf, 0, &val);
+ 
+ 	if (ret != 0) {
+-		fom_mark_inode_dirty = 0;
++		fbmm_mark_inode_dirty = 0;
+ 		return ret;
+ 	}
+ 
+ 	if (val == 0)
+-		fom_mark_inode_dirty = 0;
++		fbmm_mark_inode_dirty = 0;
+ 	else
+-		fom_mark_inode_dirty = 1;
++		fbmm_mark_inode_dirty = 1;
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_mark_inode_dirty_attribute =
+-__ATTR(mark_inode_dirty, 0644, fom_mark_inode_dirty_show, fom_mark_inode_dirty_store);
++static struct kobj_attribute fbmm_mark_inode_dirty_attribute =
++__ATTR(mark_inode_dirty, 0644, fbmm_mark_inode_dirty_show, fbmm_mark_inode_dirty_store);
+ 
+-static ssize_t fom_prealloc_map_populate_show(struct kobject *kobj,
++static ssize_t fbmm_prealloc_map_populate_show(struct kobject *kobj,
+ 		struct kobj_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "%d\n", fom_prealloc_map_populate);
++	return sprintf(buf, "%d\n", fbmm_prealloc_map_populate);
+ }
+ 
+-static ssize_t fom_prealloc_map_populate_store(struct kobject *kobj,
++static ssize_t fbmm_prealloc_map_populate_store(struct kobject *kobj,
+ 		struct kobj_attribute *attr,
+ 		const char *buf, size_t count)
+ {
+@@ -798,61 +798,61 @@ static ssize_t fom_prealloc_map_populate_store(struct kobject *kobj,
+ 	ret = kstrtoint(buf, 0, &val);
+ 
+ 	if (ret != 0) {
+-		fom_prealloc_map_populate = 1;
++		fbmm_prealloc_map_populate = 1;
+ 		return ret;
+ 	}
+ 
+ 	if (val == 0)
+-		fom_prealloc_map_populate = 0;
++		fbmm_prealloc_map_populate = 0;
+ 	else
+-		fom_prealloc_map_populate = 1;
++		fbmm_prealloc_map_populate = 1;
+ 
+ 	return count;
+ }
+-static struct kobj_attribute fom_prealloc_map_populate_attribute =
+-__ATTR(prealloc_map_populate, 0644, fom_prealloc_map_populate_show, fom_prealloc_map_populate_store);
++static struct kobj_attribute fbmm_prealloc_map_populate_attribute =
++__ATTR(prealloc_map_populate, 0644, fbmm_prealloc_map_populate_show, fbmm_prealloc_map_populate_store);
+ 
+-static struct attribute *file_only_mem_attr[] = {
+-	&fom_state_attribute.attr,
+-	&fom_pid_attribute.attr,
+-	&fom_file_dir_attribute.attr,
+-	&fom_stats_attribute.attr,
+-	&fom_dax_pte_fault_size_attribute.attr,
++static struct attribute *file_based_mm_attr[] = {
++	&fbmm_state_attribute.attr,
++	&fbmm_pid_attribute.attr,
++	&fbmm_file_dir_attribute.attr,
++	&fbmm_stats_attribute.attr,
++	&fbmm_dax_pte_fault_size_attribute.attr,
+ 	&nt_huge_page_zero_attribute.attr,
+-	&fom_follow_page_mask_fix_attribute.attr,
+-	&fom_pmem_write_zeroes_attribute.attr,
+-	&fom_track_pfn_insert_attribute.attr,
+-	&fom_mark_inode_dirty_attribute.attr,
+-	&fom_prealloc_map_populate_attribute.attr,
++	&fbmm_follow_page_mask_fix_attribute.attr,
++	&fbmm_pmem_write_zeroes_attribute.attr,
++	&fbmm_track_pfn_insert_attribute.attr,
++	&fbmm_mark_inode_dirty_attribute.attr,
++	&fbmm_prealloc_map_populate_attribute.attr,
+ 	NULL,
+ };
+ 
+-static const struct attribute_group file_only_mem_attr_group = {
+-	.attrs = file_only_mem_attr,
++static const struct attribute_group file_based_mm_attr_group = {
++	.attrs = file_based_mm_attr,
+ };
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ // Init
+-static int __init file_only_memory_init(void)
++static int __init file_based_mm_init(void)
+ {
+-	struct kobject *fom_kobj;
++	struct kobject *fbmm_kobj;
+ 	int err;
+ 
+ 	memset(file_dir, 0, PATH_MAX);
+ 
+-	fom_kobj = kobject_create_and_add("fom", mm_kobj);
+-	if (unlikely(!fom_kobj)) {
+-		pr_err("failed to create the file only memory kobject\n");
++	fbmm_kobj = kobject_create_and_add("fbmm", mm_kobj);
++	if (unlikely(!fbmm_kobj)) {
++		pr_err("failed to create the file based mm kobject\n");
+ 		return -ENOMEM;
+ 	}
+ 
+-	err = sysfs_create_group(fom_kobj, &file_only_mem_attr_group);
++	err = sysfs_create_group(fbmm_kobj, &file_based_mm_attr_group);
+ 	if (err) {
+-		pr_err("failed to register the file only memory group\n");
+-		kobject_put(fom_kobj);
++		pr_err("failed to register the file based mm group\n");
++		kobject_put(fbmm_kobj);
+ 		return err;
+ 	}
+ 
+ 	return 0;
+ }
+-subsys_initcall(file_only_memory_init);
++subsys_initcall(file_based_mm_init);
+diff --git a/mm/gup.c b/mm/gup.c
+index da75fc1d90f1..e16ba75a21dc 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -21,7 +21,7 @@
+ 
+ #include <asm/mmu_context.h>
+ #include <asm/tlbflush.h>
+-#include <linux/file_only_mem.h>
++#include <linux/file_based_mm.h>
+ 
+ #include "internal.h"
+ 
+@@ -644,7 +644,7 @@ static struct page *follow_page_pte(struct vm_area_struct *vma,
+ 	return no_page_table(vma, flags);
+ }
+ 
+-extern int fom_follow_page_mask_fix;
++extern int fbmm_follow_page_mask_fix;
+ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
+ 				    unsigned long address, pud_t *pudp,
+ 				    unsigned int flags,
+@@ -670,7 +670,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
+ 		page = follow_devmap_pmd(vma, address, pmd, flags, &ctx->pgmap);
+ 		spin_unlock(ptl);
+ 		if (page) {
+-			if ((pmd_val(pmdval) & _PAGE_PSE) && fom_follow_page_mask_fix)
++			if ((pmd_val(pmdval) & _PAGE_PSE) && fbmm_follow_page_mask_fix)
+ 				ctx->page_mask = HPAGE_PMD_NR - 1;
+ 			return page;
+ 		}
+@@ -1517,7 +1517,7 @@ long populate_vma_page_range(struct vm_area_struct *vma,
+ 	if ((vma->vm_flags & (VM_WRITE | VM_SHARED)) == VM_WRITE)
+ 		gup_flags |= FOLL_WRITE;
+     /* We DO want to dirty writeable pages if they aare for FOM though */
+-	else if ((vma->vm_flags & VM_WRITE) && use_file_only_mem(current->tgid)) {
++	else if ((vma->vm_flags & VM_WRITE) && use_file_based_mm(current->tgid)) {
+ 		gup_flags |= FOLL_WRITE;
+ 	}
+ 
+diff --git a/mm/memory.c b/mm/memory.c
+index 9c16851a2c86..558eadc64723 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -2235,7 +2235,7 @@ static bool vm_mixed_ok(struct vm_area_struct *vma, pfn_t pfn)
+ 	return false;
+ }
+ 
+-extern int fom_track_pfn_insert;
++extern int fbmm_track_pfn_insert;
+ static vm_fault_t __vm_insert_mixed(struct vm_area_struct *vma,
+ 		unsigned long addr, pfn_t pfn, pgprot_t pgprot,
+ 		bool mkwrite)
+@@ -2247,7 +2247,7 @@ static vm_fault_t __vm_insert_mixed(struct vm_area_struct *vma,
+ 	if (addr < vma->vm_start || addr >= vma->vm_end)
+ 		return VM_FAULT_SIGBUS;
+ 
+-	if (fom_track_pfn_insert) {
++	if (fbmm_track_pfn_insert) {
+ 		track_pfn_insert(vma, &pgprot, pfn);
+ 	}
+ 
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 89e7c529e7c6..07167a9a3373 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -51,7 +51,7 @@
+ #include <asm/cacheflush.h>
+ #include <asm/tlb.h>
+ #include <asm/mmu_context.h>
+-#include <linux/file_only_mem.h>
++#include <linux/file_based_mm.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/mmap.h>
+@@ -259,15 +259,15 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
+ 		goto out;
+ 
+ 	/* Ok, looks good - let it rip. */
+-	if (use_file_only_mem(current->tgid)) {
++	if (use_file_based_mm(current->tgid)) {
+ 		vm_flags_t vm_flags;
+ 		unsigned long prot = PROT_READ | PROT_WRITE;
+-		struct file *f = fom_create_new_file(newbrk-oldbrk, prot, 0);
++		struct file *f = fbmm_create_new_file(newbrk-oldbrk, prot, 0);
+ 
+ 		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
+ 			| VM_SHARED | VM_MAYSHARE;
+ 		mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, 0, NULL);
+-		fom_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
++		fbmm_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
+ 	} else {
+ 		brkvma = mas_prev(&mas, mm->start_brk);
+ 		if (do_brk_flags(&mas, brkvma, oldbrk, newbrk-oldbrk, 0) < 0)
+@@ -1255,7 +1255,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 	struct mm_struct *mm = current->mm;
+ 	vm_flags_t vm_flags;
+ 	int pkey = 0;
+-	bool created_fom_file = false;
++	bool created_fbmm_file = false;
+ 
+ 	validate_mm(mm);
+ 	*populate = 0;
+@@ -1294,11 +1294,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 		return -ENOMEM;
+ 
+ 	// See if we want to use file only memory
+-	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
+-		file = fom_create_new_file(len, prot, flags);
++	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current->tgid)) {
++		file = fbmm_create_new_file(len, prot, flags);
+ 
+ 		if (file) {
+-			created_fom_file = true;
++			created_fbmm_file = true;
+ 			flags = flags & ~MAP_ANONYMOUS;
+ 
+ 			// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
+@@ -1444,11 +1444,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 		*populate = len;
+ 
+ 	// Because mmap_region will unmap regions that overlap with the new region,
+-	// we must wait to register the new fom file until after it is finished.
+-	// This is to prevent a fom file from being registered and then an overlapping
++	// we must wait to register the new fbmm file until after it is finished.
++	// This is to prevent a fbmm file from being registered and then an overlapping
+ 	// region is unmapped, making the fom system think it needs to delete the new file
+-	if (created_fom_file) {
+-		fom_register_file(current->tgid, file, addr, len);
++	if (created_fbmm_file) {
++		fbmm_register_file(current->tgid, file, addr, len);
+ 	}
+ 	return addr;
+ }
+@@ -2522,7 +2522,7 @@ do_mas_align_munmap(struct ma_state *mas, struct vm_area_struct *vma,
+ 	remove_mt(mm, &mas_detach);
+ 	__mt_destroy(&mt_detach);
+ 
+-	fom_munmap(current->tgid, start, end - start);
++	fbmm_munmap(current->tgid, start, end - start);
+ 
+ 	validate_mm(mm);
+ 	return downgrade ? 1 : 0;
+-- 
+2.49.0
+

@@ -1,0 +1,129 @@
+From 32e137793f224c158f245a1bbee1a03e001bf954 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Thu, 28 Apr 2022 14:25:43 -0500
+Subject: [PATCH 045/179] Prefault FOM data if MAP_POPULATE is sent
+
+---
+ fs/ext4/extents.c             |  1 +
+ include/linux/file_only_mem.h |  4 ++--
+ mm/file_only_mem.c            | 26 +++++++++++++++-----------
+ mm/mmap.c                     |  4 ++--
+ 4 files changed, 20 insertions(+), 15 deletions(-)
+
+diff --git a/fs/ext4/extents.c b/fs/ext4/extents.c
+index ee5acf2bd5e6..1ad29f70b1ff 100644
+--- a/fs/ext4/extents.c
++++ b/fs/ext4/extents.c
+@@ -4082,6 +4082,7 @@ static int get_implied_cluster_alloc(struct super_block *sb,
+  *
+  * return < 0, error case.
+  */
++#include <linux/file_only_mem.h>
+ int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
+ 			struct ext4_map_blocks *map, int flags)
+ {
+diff --git a/include/linux/file_only_mem.h b/include/linux/file_only_mem.h
+index a9ca622604ea..3732d186f729 100644
+--- a/include/linux/file_only_mem.h
++++ b/include/linux/file_only_mem.h
+@@ -8,7 +8,7 @@
+ 
+ bool use_file_only_mem(pid_t pid);
+ 
+-struct file *fom_create_new_file(unsigned long len,	unsigned long prot);
++struct file *fom_create_new_file(unsigned long len,	unsigned long prot, int flags);
+ void fom_register_file(pid_t pid, struct file *f, unsigned long start,
+ 		unsigned long len);
+ int fom_munmap(pid_t pid, unsigned long start, unsigned long len);
+@@ -20,7 +20,7 @@ inline bool use_file_only_mem(pid_t pid) {
+ 	return false;
+ }
+ 
+-inline struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
++inline struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flags) {
+ 	return NULL;
+ }
+ 
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index 8464869c69e6..60b7a17a6dde 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -150,7 +150,7 @@ static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long add
+ // Helper functions
+ 
+ // Most of this is taken from do_sys_truncate in fs/open.c
+-static int truncate_fom_file(struct file *f, unsigned long len) {
++static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
+ 	struct inode *inode;
+ 	struct dentry *dentry;
+ 	int error;
+@@ -158,14 +158,18 @@ static int truncate_fom_file(struct file *f, unsigned long len) {
+ 	dentry = f->f_path.dentry;
+ 	inode = dentry->d_inode;
+ 
+-	sb_start_write(inode->i_sb);
+-	error = locks_verify_truncate(inode, f, len);
+-	if (!error)
+-		error = security_path_truncate(&f->f_path);
+-	if (!error)
+-		error = do_truncate(file_mnt_user_ns(f), dentry, len,
+-				    ATTR_MTIME | ATTR_CTIME, f);
+-	sb_end_write(inode->i_sb);
++	if (flags & MAP_POPULATE) {
++		error = vfs_fallocate(f, 0, 0, len);
++	} else {
++		sb_start_write(inode->i_sb);
++		error = locks_verify_truncate(inode, f, len);
++		if (!error)
++			error = security_path_truncate(&f->f_path);
++		if (!error)
++			error = do_truncate(file_mnt_user_ns(f), dentry, len,
++					    ATTR_MTIME | ATTR_CTIME, f);
++		sb_end_write(inode->i_sb);
++	}
+ 
+ 	return error;
+ }
+@@ -196,7 +200,7 @@ bool use_file_only_mem(pid_t pid) {
+ 	return false;
+ }
+ 
+-struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
++struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flags) {
+ 	struct file *f;
+ 	int open_flags = O_EXCL | O_TMPFILE;
+ 	umode_t open_mode = 0;
+@@ -223,7 +227,7 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
+ 		return NULL;
+ 
+ 	// Set the file to the correct size
+-	ret = truncate_fom_file(f, len);
++	ret = truncate_fom_file(f, len, flags);
+ 	if (ret) {
+ 		filp_close(f, current->files);
+ 		return NULL;
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 8fe2cfc29cff..89e7c529e7c6 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -262,7 +262,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
+ 	if (use_file_only_mem(current->tgid)) {
+ 		vm_flags_t vm_flags;
+ 		unsigned long prot = PROT_READ | PROT_WRITE;
+-		struct file *f = fom_create_new_file(newbrk-oldbrk, prot);
++		struct file *f = fom_create_new_file(newbrk-oldbrk, prot, 0);
+ 
+ 		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
+ 			| VM_SHARED | VM_MAYSHARE;
+@@ -1295,7 +1295,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 
+ 	// See if we want to use file only memory
+ 	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
+-		file = fom_create_new_file(len, prot);
++		file = fom_create_new_file(len, prot, flags);
+ 
+ 		if (file) {
+ 			created_fom_file = true;
+-- 
+2.49.0
+

@@ -1,0 +1,23 @@
+From f1b24b56c8e101cc52760c16b8c1039609317106 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Tue, 11 Oct 2022 14:05:51 -0500
+Subject: [PATCH 054/179] Fix Kconfig issue
+
+---
+ fs/Kconfig | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/fs/Kconfig b/fs/Kconfig
+index ca3df7e67491..2685a4d0d353 100644
+--- a/fs/Kconfig
++++ b/fs/Kconfig
+@@ -392,6 +392,4 @@ source "fs/unicode/Kconfig"
+ config IO_WQ
+ 	bool
+ 
+-source "fs/FOMTierFS/Kconfig"
+-
+ endmenu
+-- 
+2.49.0
+

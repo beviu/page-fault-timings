@@ -1,0 +1,26 @@
+From 1edd8c98cffa8ad1326012d273d6ad071fff551a Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Mon, 11 Dec 2023 16:33:51 -0600
+Subject: [PATCH 129/179] FBMM Shim: Clear munmap stats when writing to stats
+ file
+
+---
+ mm/file_based_mm.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 50f79d9c0ea8..57cafe4de965 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -579,6 +579,8 @@ static ssize_t fbmm_stats_store(struct kobject *kobj,
+ 	num_file_creates = 0;
+ 	file_register_time = 0;
+ 	num_file_registers = 0;
++	munmap_time = 0;
++	num_munmaps = 0;
+ 	return count;
+ }
+ static struct kobj_attribute fbmm_stats_attribute =
+-- 
+2.49.0
+

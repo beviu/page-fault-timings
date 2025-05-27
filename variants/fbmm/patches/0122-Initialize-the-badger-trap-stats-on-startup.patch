@@ -1,0 +1,39 @@
+From c65a782c3d22c954ac63b45be4d9aef887a304a7 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Mon, 6 Nov 2023 21:55:19 -0600
+Subject: [PATCH 122/179] Initialize the badger trap stats on startup
+
+---
+ kernel/fork.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 42a6f82314e3..ecd6bbd7e11b 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1176,6 +1176,10 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
+ 	INIT_LIST_HEAD(&mm->range_tlb);
+ 	mt_init(&mm->all_ranges);
+ 	mm->range_tlb_size = 0;
++	mm->total_dtlb_misses = 0;
++	mm->total_dtlb_4k_misses = 0;
++	mm->total_dtlb_hugetlb_misses = 0;
++	mm->total_range_tlb_hits = 0;
+ 
+ 	mm->user_ns = get_user_ns(user_ns);
+ 	lru_gen_init_mm(mm);
+@@ -2728,6 +2732,11 @@ pid_t kernel_clone(struct kernel_clone_args *args)
+ 		task_unlock(p);
+ 	}
+ 
++	// Bijan: Make sure the badger trap numbers are clear
++	p->total_dtlb_misses = 0;
++	p->total_dtlb_4k_misses = 0;
++	p->total_dtlb_hugetlb_misses = 0;
++	// Copy the default fbmm mount dir on fork
+ 	if (use_file_based_mm(current->tgid)) {
+ 		if (fbmm_copy_mnt_dir(current->tgid, p->tgid)) {
+ 			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
+-- 
+2.49.0
+

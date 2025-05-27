@@ -1,0 +1,26 @@
+From bf4e7111b1a36a4eb95938f94489d3c00f7a9e63 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Fri, 14 Oct 2022 12:23:29 -0500
+Subject: [PATCH 057/179] FOMTierFS: Have fallocate put the right value for
+ mapping->page_offset
+
+---
+ FOMTierFS/fs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/FOMTierFS/fs.c b/FOMTierFS/fs.c
+index 3061cdd29b2b..5c7abc3279b7 100644
+--- a/FOMTierFS/fs.c
++++ b/FOMTierFS/fs.c
+@@ -198,7 +198,7 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
+             return -ENOMEM;
+         }
+ 
+-        mapping->page_offset = off;
++        mapping->page_offset = off >> PAGE_SHIFT;
+         mapping->page = page;
+         if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
+             BUG();
+-- 
+2.49.0
+

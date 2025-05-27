@@ -1,0 +1,253 @@
+From 346c9c8d80529f9d585a674a1fa808f97bc0897a Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Wed, 27 Mar 2024 10:04:30 -0500
+Subject: [PATCH 160/179] FBMM: Add support for swapping in pages
+
+---
+ BasicMMFS/basic.c             | 82 +++++++++++++++++++++++++++--------
+ BasicMMFS/basic.h             |  1 +
+ include/linux/file_based_mm.h |  2 +-
+ mm/fbmm_helpers.c             | 40 ++++++++---------
+ 4 files changed, 86 insertions(+), 39 deletions(-)
+
+diff --git a/BasicMMFS/basic.c b/BasicMMFS/basic.c
+index 26ab04707282..bf05666eeb82 100644
+--- a/BasicMMFS/basic.c
++++ b/BasicMMFS/basic.c
+@@ -12,6 +12,8 @@
+ #include <linux/falloc.h>
+ #include <linux/pagewalk.h>
+ #include <linux/file_based_mm.h>
++#include <linux/swap.h>
++#include <linux/swapops.h>
+ 
+ #include "basic.h"
+ 
+@@ -35,15 +37,26 @@ struct page *basicmmfs_alloc_page(struct basicmmfs_inode_info *inode_info, struc
+         u64 page_offset)
+ {
+     u8 *kaddr;
++    u64 pages_added;
++    u64 alloc_size = 64;
+     struct page *page = NULL;
+ 
+     spin_lock(&sbi->lock);
+ 
+     // First, do we have any free pages available?
+     if (sbi->free_pages == 0) {
+-        // TODO: when swapping is added, add a mechanism to get more pages if
+-        // we have fewer total pages than the max allowed
+-        goto unlock;
++        // Try to allocate more pages if we can
++        alloc_size = min(alloc_size, sbi->max_pages - sbi->num_pages);
++        if (alloc_size == 0)
++            goto unlock;
++
++        pages_added = alloc_pages_bulk_list(GFP_HIGHUSER, alloc_size, &sbi->free_list);
++
++        if (pages_added == 0)
++            goto unlock;
++
++        sbi->num_pages += pages_added;
++        sbi->free_pages += pages_added;
+     }
+ 
+     // Take a page from the free list
+@@ -154,6 +167,8 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     struct basicmmfs_inode_info *inode_info;
+     struct basicmmfs_sb_info *sbi;
+     struct page *page;
++    bool new_page = false;
++    bool swap_page = false;
+     u64 pgoff = ((vmf->address - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+     vm_fault_t ret = 0;
+     pte_t entry;
+@@ -161,19 +176,17 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     inode_info = BMMFS_I(inode);
+     sbi = BMMFS_SB(inode->i_sb);
+ 
+-    // For now, do nothing if the pte already exists.
+-    // TODO: I'm not sure if this is right...
+-    if (vmf->pte) {
+-        vmf->page = page;
+-        return 0;
++    if (!vmf->pte) {
++        if (pte_alloc(vma->vm_mm, vmf->pmd))
++            return VM_FAULT_OOM;
+     }
+ 
+-    if (pte_alloc(vma->vm_mm, vmf->pmd))
+-        return VM_FAULT_OOM;
+-
+-    vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
+-    if (!pte_none(*vmf->pte)) {
+-        goto unlock;
++    vmf->pte = pte_offset_map(vmf->pmd, vmf->address);
++    vmf->orig_pte = *vmf->pte;
++    if (!pte_none(vmf->orig_pte) && pte_present(vmf->orig_pte)) {
++        // It looks like the PTE is already populated, so just return
++        ret = VM_FAULT_NOPAGE;
++        goto unmap;
+     }
+ 
+     // Get the page if it already allocated
+@@ -182,13 +195,45 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     // Try to allocate the page if it hasn't been already (e.g. from fallocate)
+     if (!page) {
+         page = basicmmfs_alloc_page(inode_info, sbi, pgoff);
++        new_page = true;
+         if (!page) {
+             ret = VM_FAULT_OOM;
+-            goto unlock;
++            goto unmap;
+         }
+-        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
+     }
+ 
++    if (!pte_none(vmf->orig_pte) && !pte_present(vmf->orig_pte)) {
++        // Swapped out page
++        struct page *ret_page;
++        swp_entry_t swp_entry = pte_to_swp_entry(vmf->orig_pte);
++        swap_page = true;
++
++        ret_page = fbmm_read_swap_entry(vmf, swp_entry, pgoff, page);
++        if (page != ret_page) {
++            // A physical page was already being used for this virt page
++            // or there was an error, so we can return the page we allocated.
++            basicmmfs_return_page(page, sbi);
++            page = ret_page;
++            new_page = false;
++        }
++        if (!page) {
++            pr_err("Error swapping in page! %lx\n", vmf->address);
++            goto unmap;
++        }
++    }
++
++    vmf->ptl = pte_lockptr(vma->vm_mm, vmf->pmd);
++    spin_lock(vmf->ptl);
++    // Check if some other thread faulted here
++    if (!pte_same(vmf->orig_pte, *vmf->pte)) {
++        if (new_page) {
++            basicmmfs_return_page(page, sbi);
++        }
++        goto unlock;
++    }
++
++    if (new_page || swap_page)
++        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
+ 
+     // Construct the pte entry
+     entry = mk_pte(page, vma->vm_page_prot);
+@@ -208,7 +253,9 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     ret = VM_FAULT_NOPAGE;
+ 
+ unlock:
+-    pte_unmap_unlock(vmf->pte, vmf->ptl);
++    spin_unlock(vmf->ptl);
++unmap:
++    pte_unmap(vmf->pte);
+     return ret;
+ }
+ 
+@@ -520,6 +567,7 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
+     spin_lock_init(&sbi->lock);
+     INIT_LIST_HEAD(&sbi->free_list);
+     INIT_LIST_HEAD(&sbi->active_list);
++    sbi->max_pages = nr_pages;
+     sbi->num_pages = 0;
+     // TODO: Get the number of pages to request from a mount arg
+     // Might need to be GFP_HIGHUSER?
+diff --git a/BasicMMFS/basic.h b/BasicMMFS/basic.h
+index 619d50107b81..ff576ab3c0a3 100644
+--- a/BasicMMFS/basic.h
++++ b/BasicMMFS/basic.h
+@@ -12,6 +12,7 @@ struct basicmmfs_sb_info {
+     struct list_head free_list;
+     struct list_head active_list;
+     u64 num_pages;
++    u64 max_pages;
+     u64 free_pages;
+ };
+ 
+diff --git a/include/linux/file_based_mm.h b/include/linux/file_based_mm.h
+index 8a47262e93bd..d9ce56d42826 100644
+--- a/include/linux/file_based_mm.h
++++ b/include/linux/file_based_mm.h
+@@ -22,7 +22,7 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst);
+ // FBMM Helper functions for MFSs
+ bool fbmm_swapout_folio(struct folio *folio);
+ int fbmm_writepage(struct page *page, struct writeback_control *wbc);
+-struct folio *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff);
++struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff, struct page *page);
+ 
+ #else //CONFIG_FILE_BASED_MM
+ 
+diff --git a/mm/fbmm_helpers.c b/mm/fbmm_helpers.c
+index f96715758229..133627d1a57d 100644
+--- a/mm/fbmm_helpers.c
++++ b/mm/fbmm_helpers.c
+@@ -245,41 +245,39 @@ int fbmm_writepage(struct page *page, struct writeback_control *wbc)
+ }
+ EXPORT_SYMBOL(fbmm_writepage);
+ 
+-struct folio *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff)
++struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff, struct page *page)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+ 	struct address_space *mapping = vma->vm_file->f_mapping;
+-    struct swap_info_struct *si;
++	struct swap_info_struct *si;
+ 	struct folio *folio;
+-    struct page *page;
+ 
+-	if (unlikely(non_swap_entry(entry)))
++	if (unlikely(non_swap_entry(entry))) {
+ 		return NULL;
++	}
+ 
+ 	// If a folio is already mapped here, just return that.
+ 	// Another process has probably already brought in the shared page
+ 	folio = filemap_get_folio(mapping, pgoff);
+-	if (folio)
+-		return folio;
+-
+-    si = get_swap_device(entry);
+-    if (!si)
+-        return NULL;
++	if (IS_ERR(folio)) {
++		return folio_page(folio, 0);
++	}
+ 
+-    // Do we need to zero if we're going to overwrite it anyway? I don't think so?
+-    folio = folio_alloc(GFP_HIGHUSER, 0);
+-    if (!folio)
+-        return NULL;
+-    page = &folio->page;
++	si = get_swap_device(entry);
++	if (!si) {
++		return NULL;
++	}
+ 
+-    folio_set_swap_entry(folio, entry);
+-    swap_readpage(page, true, NULL);
+-    folio->private = NULL;
++	folio = page_folio(page);
+ 
+-    __filemap_add_folio(mapping, folio, pgoff, GFP_KERNEL, NULL);
++	folio_set_swap_entry(folio, entry);
++	swap_readpage(page, true, NULL);
++	folio->private = NULL;
+ 
+-    swap_free(entry);
++	swap_free(entry);
+ 
+-	return folio;
++	count_vm_events(PSWPIN, thp_nr_pages(page));
++	dec_mm_counter(vma->vm_mm, MM_SWAPENTS);
++	return folio_page(folio, 0);
+ }
+ EXPORT_SYMBOL(fbmm_read_swap_entry);
+-- 
+2.49.0
+

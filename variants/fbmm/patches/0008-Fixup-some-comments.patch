@@ -1,0 +1,33 @@
+From 51aac87d0706215ea773d3e210bb945a1b360e3a Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Mon, 4 Oct 2021 16:58:42 -0500
+Subject: [PATCH 008/179] Fixup some comments
+
+---
+ mm/file_only_mem.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index e9c56ac49618..c0a787ff8f7d 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -110,7 +110,7 @@ static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_ma
+ ///////////////////////////////////////////////////////////////////////////////
+ // Helper functions
+ 
+-// Most of this is taken from do_sys_truncate is fs/open.c
++// Most of this is taken from do_sys_truncate in fs/open.c
+ static int truncate_fom_file(struct file *f, unsigned long len) {
+ 	struct inode *inode;
+ 	struct dentry *dentry;
+@@ -131,6 +131,7 @@ static int truncate_fom_file(struct file *f, unsigned long len) {
+ 	return error;
+ }
+ 
++// Most of this is taken from do_unlinkat in fs/namei.c
+ static void delete_fom_file(struct file *f) {
+ 	struct vfsmount *mnt;
+ 	struct dentry *dentry;
+-- 
+2.49.0
+

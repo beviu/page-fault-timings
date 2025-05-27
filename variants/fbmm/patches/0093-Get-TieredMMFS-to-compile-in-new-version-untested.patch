@@ -1,0 +1,61 @@
+From 8ecd2d3a163cba5a70f8de43ccf4d9ddfc71f108 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Mon, 10 Apr 2023 15:48:30 -0500
+Subject: [PATCH 093/179] Get TieredMMFS to compile in new version (untested)
+
+---
+ TieredMMFS/fs.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/TieredMMFS/fs.c b/TieredMMFS/fs.c
+index 165f08fac29a..636cfa7d8f7f 100644
+--- a/TieredMMFS/fs.c
++++ b/TieredMMFS/fs.c
+@@ -888,8 +888,7 @@ const struct inode_operations tieredmmfs_file_inode_operations = {
+ 
+ const struct address_space_operations tieredmmfs_aops = {
+     .direct_IO = noop_direct_IO,
+-    .set_page_dirty = __set_page_dirty_no_writeback,
+-    .invalidatepage = noop_invalidatepage,
++    .dirty_folio = noop_dirty_folio,
+ };
+ 
+ struct inode *tieredmmfs_get_inode(struct super_block *sb,
+@@ -970,14 +969,14 @@ static int tieredmmfs_symlink(struct user_namespace *mnt_userns, struct inode *d
+ }
+ 
+ static int tieredmmfs_tmpfile(struct user_namespace *mnt_userns,
+-            struct inode *dir, struct dentry *dentry, umode_t mode)
++            struct inode *dir, struct file *file, umode_t mode)
+ {
+     struct inode *inode;
+ 
+     inode = tieredmmfs_get_inode(dir->i_sb, dir, mode, 0);
+     if (!inode)
+         return -ENOSPC;
+-    d_tmpfile(dentry, inode);
++    d_tmpfile(file, inode);
+     return 0;
+ }
+ 
+@@ -1110,13 +1109,15 @@ static int tieredmmfs_populate_dev_info(struct tieredmmfs_sb_info *sbi, struct b
+     // We want to work with pages of the size sbi->page_size, so calcualate
+     // this ratio to convert between them.
+     unsigned long page_size_ratio = sbi->page_size / PAGE_SIZE;
++    // Not used, but required for fs_dax_get_by_bdev
++    u64 start_off;
+ 
+     di->bdev = bdev;
+-    di->daxdev = fs_dax_get_by_bdev(bdev);
++    di->daxdev = fs_dax_get_by_bdev(bdev, &start_off, NULL, NULL);
+ 
+     // Determine how many pages are in the device
+     num_base_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
+-                    &di->virt_addr, &di->pfn);
++                    DAX_ACCESS, &di->virt_addr, &di->pfn);
+     if (num_base_pages <= 0) {
+         pr_err("TieredMMFS: Determining device size failed");
+         return -EIO;
+-- 
+2.49.0
+

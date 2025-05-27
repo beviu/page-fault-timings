@@ -1,0 +1,25 @@
+From 9d4876ebf62a36fc2f9ff345c4aeecb2bc73c702 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Tue, 10 Oct 2023 11:09:17 -0500
+Subject: [PATCH 108/179] Fix statfs
+
+---
+ ContigMMFS/contig.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ContigMMFS/contig.c b/ContigMMFS/contig.c
+index 9d9caf8762ab..acc02b9989b9 100644
+--- a/ContigMMFS/contig.c
++++ b/ContigMMFS/contig.c
+@@ -301,7 +301,7 @@ static int contigmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+     buf->f_type = sb->s_magic;
+     buf->f_bsize = PAGE_SIZE;
+     buf->f_blocks = sbi->num_pages;
+-    buf->f_bfree = buf->f_bavail = sbi->num_pages;
++    buf->f_bfree = buf->f_bavail = 0;
+     buf->f_files = LONG_MAX;
+     buf->f_ffree = LONG_MAX;
+     buf->f_namelen = 255;
+-- 
+2.49.0
+

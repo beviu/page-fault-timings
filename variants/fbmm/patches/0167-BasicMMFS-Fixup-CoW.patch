@@ -1,0 +1,43 @@
+From e414712fd3493b532d79454f4e5b91037308cfd3 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Thu, 10 Oct 2024 10:15:00 -0500
+Subject: [PATCH 167/179] BasicMMFS: Fixup CoW
+
+---
+ BasicMMFS/basic.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/BasicMMFS/basic.c b/BasicMMFS/basic.c
+index d1b9500655fa..be68d1127544 100644
+--- a/BasicMMFS/basic.c
++++ b/BasicMMFS/basic.c
+@@ -248,8 +248,6 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+             kunmap(page);
+             kunmap(old_page);
+ 
+-            // The old page is unmapped, so we can drop the reference
+-            page_remove_rmap(old_page, vma, false);
+         } else {
+             basicmmfs_return_page(page, sbi);
+             page = old_page;
+@@ -259,6 +257,17 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+         put_page(old_page);
+         // Decrease the filepage count for the same reason
+         percpu_counter_dec(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
++        page_remove_rmap(old_page, vma, false);
++
++        /**
++         * If we are copying a page for the process that originally faulted the
++         * page, we have to replace the mapping
++         */
++        if (mapping == page_folio(old_page)->mapping) {
++            if (old_page != page)
++                replace_page_cache_folio(page_folio(old_page), page_folio(page));
++            new_page = false;
++        }
+ 
+         unlock_page(old_page);
+     }
+-- 
+2.49.0
+

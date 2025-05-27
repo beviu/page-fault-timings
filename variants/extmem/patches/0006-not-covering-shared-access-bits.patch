@@ -1,0 +1,25 @@
+From 362584b801c56c57ec1e16a4ff724ae7ed0d0345 Mon Sep 17 00:00:00 2001
+From: SepehrDV2 <sepehr.jalalian.edu@gmail.com>
+Date: Mon, 18 Dec 2023 11:27:47 -0800
+Subject: [PATCH 06/14] not covering shared access bits
+
+---
+ mm/userfaultfd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/userfaultfd.c b/mm/userfaultfd.c
+index 33b1e9a06a39..c20befdd68bd 100644
+--- a/mm/userfaultfd.c
++++ b/mm/userfaultfd.c
+@@ -99,7 +99,7 @@ int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
+ 	_dst_pte = mk_pte(page, dst_vma->vm_page_prot);
+ 	if (page_in_cache && !vm_shared)
+ 		writable = false;
+-	if ((writable || !page_in_cache) && (!is_anon))
++	if ((writable || !page_in_cache) && (!is_anon | vm_shared))
+ 		_dst_pte = pte_mkdirty(_dst_pte);
+ 	if (writable) {
+ 		if (wp_copy)
+-- 
+2.49.0
+

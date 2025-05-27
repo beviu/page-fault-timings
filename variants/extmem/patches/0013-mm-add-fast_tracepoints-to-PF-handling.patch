@@ -1,0 +1,911 @@
+From 58c38e1c225687e93e8480da11082d045826bbc2 Mon Sep 17 00:00:00 2001
+From: beviu <contact@beviu.com>
+Date: Wed, 14 May 2025 19:05:42 +0200
+Subject: [PATCH 13/14] mm: add fast_tracepoints to PF handling
+
+---
+ arch/alpha/mm/fault.c         |  2 +-
+ arch/arc/mm/fault.c           |  2 +-
+ arch/arm/mm/fault.c           |  2 +-
+ arch/arm64/mm/fault.c         |  2 +-
+ arch/csky/mm/fault.c          |  2 +-
+ arch/hexagon/mm/vm_fault.c    |  2 +-
+ arch/ia64/mm/fault.c          |  2 +-
+ arch/m68k/mm/fault.c          |  2 +-
+ arch/microblaze/mm/fault.c    |  2 +-
+ arch/nds32/mm/fault.c         |  2 +-
+ arch/nios2/mm/fault.c         |  2 +-
+ arch/openrisc/mm/fault.c      |  2 +-
+ arch/parisc/mm/fault.c        |  2 +-
+ arch/powerpc/mm/copro_fault.c |  3 +-
+ arch/powerpc/mm/fault.c       |  2 +-
+ arch/riscv/mm/fault.c         |  2 +-
+ arch/s390/mm/fault.c          |  2 +-
+ arch/sh/mm/fault.c            |  2 +-
+ arch/sparc/mm/fault_32.c      |  4 +--
+ arch/sparc/mm/fault_64.c      |  2 +-
+ arch/um/kernel/trap.c         |  2 +-
+ arch/x86/mm/fault.c           | 33 +++++++++++++++++---
+ arch/xtensa/mm/fault.c        |  2 +-
+ drivers/dax/device.c          |  6 ++--
+ drivers/iommu/amd/iommu_v2.c  |  2 +-
+ drivers/iommu/io-pgfault.c    |  2 +-
+ fs/userfaultfd.c              |  7 ++++-
+ include/linux/mm.h            |  2 +-
+ include/linux/userfaultfd_k.h |  4 +--
+ include/trace/fast.h          | 18 +++++++++--
+ mm/gup.c                      |  4 +--
+ mm/hmm.c                      |  2 +-
+ mm/huge_memory.c              |  4 +--
+ mm/hugetlb.c                  |  2 +-
+ mm/ksm.c                      |  2 +-
+ mm/memory.c                   | 57 ++++++++++++++++++++++++-----------
+ mm/shmem.c                    |  4 +--
+ 37 files changed, 130 insertions(+), 66 deletions(-)
+
+diff --git a/arch/alpha/mm/fault.c b/arch/alpha/mm/fault.c
+index 56ea2856e488..366190173fb3 100644
+--- a/arch/alpha/mm/fault.c
++++ b/arch/alpha/mm/fault.c
+@@ -150,7 +150,7 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
+ 	/* If for any reason at all we couldn't handle the fault,
+ 	   make sure we exit gracefully rather than endlessly redo
+ 	   the fault.  */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+diff --git a/arch/arc/mm/fault.c b/arch/arc/mm/fault.c
+index 5787c261c9a4..e57b32fa3b00 100644
+--- a/arch/arc/mm/fault.c
++++ b/arch/arc/mm/fault.c
+@@ -137,7 +137,7 @@ void do_page_fault(unsigned long address, struct pt_regs *regs)
+ 		goto bad_area;
+ 	}
+ 
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	/* Quick path to respond to signals */
+ 	if (fault_signal_pending(fault, regs)) {
+diff --git a/arch/arm/mm/fault.c b/arch/arm/mm/fault.c
+index bf1577216ffa..dfa23f82ed23 100644
+--- a/arch/arm/mm/fault.c
++++ b/arch/arm/mm/fault.c
+@@ -232,7 +232,7 @@ __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
+ 		goto out;
+ 	}
+ 
+-	return handle_mm_fault(vma, addr & PAGE_MASK, flags, regs);
++	return handle_mm_fault(vma, addr & PAGE_MASK, flags, regs, false);
+ 
+ check_stack:
+ 	/* Don't allow expansion below FIRST_USER_ADDRESS */
+diff --git a/arch/arm64/mm/fault.c b/arch/arm64/mm/fault.c
+index 632762039714..f1856c06f4c6 100644
+--- a/arch/arm64/mm/fault.c
++++ b/arch/arm64/mm/fault.c
+@@ -502,7 +502,7 @@ static vm_fault_t __do_page_fault(struct mm_struct *mm, unsigned long addr,
+ 	 */
+ 	if (!(vma->vm_flags & vm_flags))
+ 		return VM_FAULT_BADACCESS;
+-	return handle_mm_fault(vma, addr, mm_flags, regs);
++	return handle_mm_fault(vma, addr, mm_flags, regs, false);
+ }
+ 
+ static bool is_el0_instruction_abort(unsigned long esr)
+diff --git a/arch/csky/mm/fault.c b/arch/csky/mm/fault.c
+index 7215a46b6b8e..f5e3a324aef8 100644
+--- a/arch/csky/mm/fault.c
++++ b/arch/csky/mm/fault.c
+@@ -272,7 +272,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, addr, flags, regs);
++	fault = handle_mm_fault(vma, addr, flags, regs, false);
+ 
+ 	/*
+ 	 * If we need to retry but a fatal signal is pending, handle the
+diff --git a/arch/hexagon/mm/vm_fault.c b/arch/hexagon/mm/vm_fault.c
+index ef32c5a84ff3..833a162ec2fb 100644
+--- a/arch/hexagon/mm/vm_fault.c
++++ b/arch/hexagon/mm/vm_fault.c
+@@ -91,7 +91,7 @@ void do_page_fault(unsigned long address, long cause, struct pt_regs *regs)
+ 		break;
+ 	}
+ 
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+diff --git a/arch/ia64/mm/fault.c b/arch/ia64/mm/fault.c
+index 4796cccbf74f..61f64b00d5bd 100644
+--- a/arch/ia64/mm/fault.c
++++ b/arch/ia64/mm/fault.c
+@@ -134,7 +134,7 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
+ 	 * sure we exit gracefully rather than endlessly redo the
+ 	 * fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+diff --git a/arch/m68k/mm/fault.c b/arch/m68k/mm/fault.c
+index fcb3a0d8421c..d43300fadab6 100644
+--- a/arch/m68k/mm/fault.c
++++ b/arch/m68k/mm/fault.c
+@@ -137,7 +137,7 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	 * the fault.
+ 	 */
+ 
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 	pr_debug("handle_mm_fault returns %x\n", fault);
+ 
+ 	if (fault_signal_pending(fault, regs))
+diff --git a/arch/microblaze/mm/fault.c b/arch/microblaze/mm/fault.c
+index b3fed2cecf84..d99949848c29 100644
+--- a/arch/microblaze/mm/fault.c
++++ b/arch/microblaze/mm/fault.c
+@@ -217,7 +217,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+diff --git a/arch/nds32/mm/fault.c b/arch/nds32/mm/fault.c
+index f02524eb6d56..162188ba73da 100644
+--- a/arch/nds32/mm/fault.c
++++ b/arch/nds32/mm/fault.c
+@@ -208,7 +208,7 @@ void do_page_fault(unsigned long entry, unsigned long addr,
+ 	 * the fault.
+ 	 */
+ 
+-	fault = handle_mm_fault(vma, addr, flags, regs);
++	fault = handle_mm_fault(vma, addr, flags, regs, false);
+ 
+ 	/*
+ 	 * If we need to retry but a fatal signal is pending, handle the
+diff --git a/arch/nios2/mm/fault.c b/arch/nios2/mm/fault.c
+index 9476feecf512..9f112878e7a4 100644
+--- a/arch/nios2/mm/fault.c
++++ b/arch/nios2/mm/fault.c
+@@ -134,7 +134,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long cause,
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+diff --git a/arch/openrisc/mm/fault.c b/arch/openrisc/mm/fault.c
+index c730d1a51686..2f92586cd4f2 100644
+--- a/arch/openrisc/mm/fault.c
++++ b/arch/openrisc/mm/fault.c
+@@ -162,7 +162,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	 * the fault.
+ 	 */
+ 
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+diff --git a/arch/parisc/mm/fault.c b/arch/parisc/mm/fault.c
+index 5faa3cff4738..da5448581e01 100644
+--- a/arch/parisc/mm/fault.c
++++ b/arch/parisc/mm/fault.c
+@@ -304,7 +304,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long code,
+ 	 * fault.
+ 	 */
+ 
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+diff --git a/arch/powerpc/mm/copro_fault.c b/arch/powerpc/mm/copro_fault.c
+index 8acd00178956..9e312c2309a1 100644
+--- a/arch/powerpc/mm/copro_fault.c
++++ b/arch/powerpc/mm/copro_fault.c
+@@ -64,7 +64,8 @@ int copro_handle_mm_fault(struct mm_struct *mm, unsigned long ea,
+ 	}
+ 
+ 	ret = 0;
+-	*flt = handle_mm_fault(vma, ea, is_write ? FAULT_FLAG_WRITE : 0, NULL);
++	*flt = handle_mm_fault(vma, ea, is_write ? FAULT_FLAG_WRITE : 0, NULL,
++			       false);
+ 	if (unlikely(*flt & VM_FAULT_ERROR)) {
+ 		if (*flt & VM_FAULT_OOM) {
+ 			ret = -ENOMEM;
+diff --git a/arch/powerpc/mm/fault.c b/arch/powerpc/mm/fault.c
+index 1e5fbef64076..8b886cb4aa21 100644
+--- a/arch/powerpc/mm/fault.c
++++ b/arch/powerpc/mm/fault.c
+@@ -510,7 +510,7 @@ static int ___do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	major |= fault & VM_FAULT_MAJOR;
+ 
+diff --git a/arch/riscv/mm/fault.c b/arch/riscv/mm/fault.c
+index 3fc62e05bac1..8f337e4e83e2 100644
+--- a/arch/riscv/mm/fault.c
++++ b/arch/riscv/mm/fault.c
+@@ -324,7 +324,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, addr, flags, regs);
++	fault = handle_mm_fault(vma, addr, flags, regs, false);
+ 
+ 	/*
+ 	 * If we need to retry but a fatal signal is pending, handle the
+diff --git a/arch/s390/mm/fault.c b/arch/s390/mm/fault.c
+index c930dff312df..b2be776b88b0 100644
+--- a/arch/s390/mm/fault.c
++++ b/arch/s390/mm/fault.c
+@@ -446,7 +446,7 @@ static inline vm_fault_t do_exception(struct pt_regs *regs, int access)
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 	if (fault_signal_pending(fault, regs)) {
+ 		fault = VM_FAULT_SIGNAL;
+ 		if (flags & FAULT_FLAG_RETRY_NOWAIT)
+diff --git a/arch/sh/mm/fault.c b/arch/sh/mm/fault.c
+index 88a1f453d73e..eb724e9bd36f 100644
+--- a/arch/sh/mm/fault.c
++++ b/arch/sh/mm/fault.c
+@@ -481,7 +481,7 @@ asmlinkage void __kprobes do_page_fault(struct pt_regs *regs,
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (unlikely(fault & (VM_FAULT_RETRY | VM_FAULT_ERROR)))
+ 		if (mm_fault_error(regs, error_code, address, fault))
+diff --git a/arch/sparc/mm/fault_32.c b/arch/sparc/mm/fault_32.c
+index fa858626b85b..b83aafb6e4d5 100644
+--- a/arch/sparc/mm/fault_32.c
++++ b/arch/sparc/mm/fault_32.c
+@@ -185,7 +185,7 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		return;
+@@ -337,7 +337,7 @@ static void force_user_fault(unsigned long address, int write)
+ 		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
+ 			goto bad_area;
+ 	}
+-	switch (handle_mm_fault(vma, address, flags, NULL)) {
++	switch (handle_mm_fault(vma, address, flags, NULL, false)) {
+ 	case VM_FAULT_SIGBUS:
+ 	case VM_FAULT_OOM:
+ 		goto do_sigbus;
+diff --git a/arch/sparc/mm/fault_64.c b/arch/sparc/mm/fault_64.c
+index 9a9652a15fed..3bb2c97bd964 100644
+--- a/arch/sparc/mm/fault_64.c
++++ b/arch/sparc/mm/fault_64.c
+@@ -422,7 +422,7 @@ asmlinkage void __kprobes do_sparc64_fault(struct pt_regs *regs)
+ 			goto bad_area;
+ 	}
+ 
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs))
+ 		goto exit_exception;
+diff --git a/arch/um/kernel/trap.c b/arch/um/kernel/trap.c
+index c32efb09db21..d3b90563ff98 100644
+--- a/arch/um/kernel/trap.c
++++ b/arch/um/kernel/trap.c
+@@ -71,7 +71,7 @@ int handle_page_fault(unsigned long address, unsigned long ip,
+ 	do {
+ 		vm_fault_t fault;
+ 
+-		fault = handle_mm_fault(vma, address, flags, NULL);
++		fault = handle_mm_fault(vma, address, flags, NULL, false);
+ 
+ 		if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+ 			goto out_nosemaphore;
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 42d0ca7ead41..0453017d348b 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -1230,7 +1230,8 @@ NOKPROBE_SYMBOL(do_kern_addr_fault);
+ static inline
+ void do_user_addr_fault(struct pt_regs *regs,
+ 			unsigned long error_code,
+-			unsigned long address)
++			unsigned long address,
++			bool trace)
+ {
+ 	struct vm_area_struct *vma;
+ 	struct task_struct *tsk;
+@@ -1346,6 +1347,8 @@ void do_user_addr_fault(struct pt_regs *regs,
+ 	 * 1. Failed to acquire mmap_lock, and
+ 	 * 2. The access did not originate in userspace.
+ 	 */
++	if (IS_ENABLED(CONFIG_FAST_TRACEPOINTS) && likely(trace))
++		fast_tracepoint(first_try_lock_mm_and_find_vma_start);
+ 	if (unlikely(!mmap_read_trylock(mm))) {
+ 		if (!user_mode(regs) && !search_exception_tables(regs->ip)) {
+ 			/*
+@@ -1356,6 +1359,8 @@ void do_user_addr_fault(struct pt_regs *regs,
+ 			return;
+ 		}
+ retry:
++		if (IS_ENABLED(CONFIG_FAST_TRACEPOINTS) && likely(trace) && (flags & FAULT_FLAG_TRIED))
++			fast_tracepoint(retry_lock_mm_and_find_vma_start);
+ 		mmap_read_lock(mm);
+ 	} else {
+ 		/*
+@@ -1367,6 +1372,12 @@ void do_user_addr_fault(struct pt_regs *regs,
+ 	}
+ 
+ 	vma = find_vma(mm, address);
++	if (IS_ENABLED(CONFIG_FAST_TRACEPOINTS) && likely(trace)) {
++		if (flags & FAULT_FLAG_TRIED)
++			fast_tracepoint(retry_lock_mm_and_find_vma_start);
++		else
++			fast_tracepoint(first_try_lock_mm_and_find_vma_start);
++	}
+ 	if (unlikely(!vma)) {
+ 		bad_area(regs, error_code, address);
+ 		return;
+@@ -1405,7 +1416,19 @@ void do_user_addr_fault(struct pt_regs *regs,
+ 	 * userland). The return to userland is identified whenever
+ 	 * FAULT_FLAG_USER|FAULT_FLAG_KILLABLE are both set in flags.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace)) {
++		if (flags & FAULT_FLAG_TRIED)
++			fast_tracepoint(retry_handle_mm_fault_with_mm_lock_start);
++		else
++			fast_tracepoint(first_try_handle_mm_fault_with_mm_lock_start);
++	}
++	fault = handle_mm_fault(vma, address, flags, regs, trace);
++	if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace)) {
++		if (flags & FAULT_FLAG_TRIED)
++			fast_tracepoint(retry_handle_mm_fault_with_mm_lock_end);
++		else
++			fast_tracepoint(first_try_handle_mm_fault_with_mm_lock_end);
++	}
+ 
+ 	if (fault_signal_pending(fault, regs)) {
+ 		/*
+@@ -1486,7 +1509,7 @@ trace_page_fault_entries(struct pt_regs *regs, unsigned long error_code,
+ 
+ static __always_inline void
+ handle_page_fault(struct pt_regs *regs, unsigned long error_code,
+-			      unsigned long address)
++			      unsigned long address, bool trace)
+ {
+ 	trace_page_fault_entries(regs, error_code, address);
+ 
+@@ -1497,7 +1520,7 @@ handle_page_fault(struct pt_regs *regs, unsigned long error_code,
+ 	if (unlikely(fault_in_kernel_space(address))) {
+ 		do_kern_addr_fault(regs, error_code, address);
+ 	} else {
+-		do_user_addr_fault(regs, error_code, address);
++		do_user_addr_fault(regs, error_code, address, trace);
+ 		/*
+ 		 * User address page fault handling might have reenabled
+ 		 * interrupts. Fixing up all potential exit points of
+@@ -1557,7 +1580,7 @@ DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)
+ 	state = irqentry_enter(regs);
+ 
+ 	instrumentation_begin();
+-	handle_page_fault(regs, error_code, address);
++	handle_page_fault(regs, error_code, address, trace);
+ 	instrumentation_end();
+ 
+ 	irqentry_exit(regs, state);
+diff --git a/arch/xtensa/mm/fault.c b/arch/xtensa/mm/fault.c
+index 95a74890c7e9..608862ff924e 100644
+--- a/arch/xtensa/mm/fault.c
++++ b/arch/xtensa/mm/fault.c
+@@ -110,7 +110,7 @@ void do_page_fault(struct pt_regs *regs)
+ 	 * make sure we exit gracefully rather than endlessly redo
+ 	 * the fault.
+ 	 */
+-	fault = handle_mm_fault(vma, address, flags, regs);
++	fault = handle_mm_fault(vma, address, flags, regs, false);
+ 
+ 	if (fault_signal_pending(fault, regs)) {
+ 		if (!user_mode(regs))
+diff --git a/drivers/dax/device.c b/drivers/dax/device.c
+index 3fb6d0a54b9b..503e2afe0617 100644
+--- a/drivers/dax/device.c
++++ b/drivers/dax/device.c
+@@ -99,7 +99,7 @@ static vm_fault_t __dev_dax_pte_fault(struct dev_dax *dev_dax,
+ 
+ 	if (vma && userfaultfd_missing(vma)) {
+ 		//printk("drivers/dax/device.c: __dev_dax_pte_fault: vma && userfaultfd_missing(vma)\n");
+-		return handle_userfault(vmf, VM_UFFD_MISSING);
++		return handle_userfault(vmf, VM_UFFD_MISSING, false);
+ 	}
+ 
+ 	phys = dax_pgoff_to_phys(dev_dax, vmf->pgoff, PAGE_SIZE);
+@@ -148,7 +148,7 @@ static vm_fault_t __dev_dax_pmd_fault(struct dev_dax *dev_dax,
+ 
+ 	if (vma && userfaultfd_missing(vma)) {
+ 		//printk("drivers/dax/device.c: __dev_dax_pmd_fault: vma && userfaultfd_missing(vm)\n");
+-        return handle_userfault(vmf, VM_UFFD_MISSING);
++        return handle_userfault(vmf, VM_UFFD_MISSING, false);
+ 	}
+ 
+ 	pgoff = linear_page_index(vmf->vma, pmd_addr);
+@@ -196,7 +196,7 @@ static vm_fault_t __dev_dax_pud_fault(struct dev_dax *dev_dax,
+ 
+ 	if (vma && userfaultfd_missing(vma)) {
+         //printk("drivers/dax/device.c: __dev_dax_pud_fault: vma && userfaultfd_missing(vm)\n");
+-		return handle_userfault(vmf, VM_UFFD_MISSING);
++		return handle_userfault(vmf, VM_UFFD_MISSING, false);
+ 	}
+ 
+ 	pgoff = linear_page_index(vmf->vma, pud_addr);
+diff --git a/drivers/iommu/amd/iommu_v2.c b/drivers/iommu/amd/iommu_v2.c
+index 29a3a62b7a3a..e54a2634fbb8 100644
+--- a/drivers/iommu/amd/iommu_v2.c
++++ b/drivers/iommu/amd/iommu_v2.c
+@@ -496,7 +496,7 @@ static void do_fault(struct work_struct *work)
+ 	if (access_error(vma, fault))
+ 		goto out;
+ 
+-	ret = handle_mm_fault(vma, address, flags, NULL);
++	ret = handle_mm_fault(vma, address, flags, NULL, false);
+ out:
+ 	mmap_read_unlock(mm);
+ 
+diff --git a/drivers/iommu/io-pgfault.c b/drivers/iommu/io-pgfault.c
+index 1df8c1dcae77..fc6472a643e1 100644
+--- a/drivers/iommu/io-pgfault.c
++++ b/drivers/iommu/io-pgfault.c
+@@ -114,7 +114,7 @@ iopf_handle_single(struct iopf_fault *iopf)
+ 		/* Access fault */
+ 		goto out_put_mm;
+ 
+-	ret = handle_mm_fault(vma, prm->addr, fault_flags, NULL);
++	ret = handle_mm_fault(vma, prm->addr, fault_flags, NULL, false);
+ 	status = ret & VM_FAULT_ERROR ? IOMMU_PAGE_RESP_INVALID :
+ 		IOMMU_PAGE_RESP_SUCCESS;
+ 
+diff --git a/fs/userfaultfd.c b/fs/userfaultfd.c
+index 8496d283294b..2e174daec61c 100644
+--- a/fs/userfaultfd.c
++++ b/fs/userfaultfd.c
+@@ -28,6 +28,7 @@
+ #include <linux/ioctl.h>
+ #include <linux/security.h>
+ #include <linux/hugetlb.h>
++#include <trace/fast.h>
+ 
+ int sysctl_unprivileged_userfaultfd __read_mostly;
+ 
+@@ -369,7 +370,7 @@ static inline unsigned int userfaultfd_get_blocking_state(unsigned int flags)
+  * fatal_signal_pending()s, and the mmap_lock must be released before
+  * returning it.
+  */
+-vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
++vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason, bool trace)
+ {
+ 	struct mm_struct *mm = vmf->vma->vm_mm;
+ 	struct userfaultfd_ctx *ctx;
+@@ -531,7 +532,11 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
+ 	mmap_read_unlock(mm);
+ 
+ 	if (likely(must_wait && !READ_ONCE(ctx->released))) {
++		if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++			fast_tracepoint(wake_up_userfaultfd_start);
+ 		wake_up_poll(&ctx->fd_wqh, EPOLLIN);
++		if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++			fast_tracepoint(wake_up_userfaultfd_end);
+ 		schedule();
+ 	}
+ 
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 5692055f202c..6005b505b470 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -1775,7 +1775,7 @@ int invalidate_inode_page(struct page *page);
+ #ifdef CONFIG_MMU
+ extern vm_fault_t handle_mm_fault(struct vm_area_struct *vma,
+ 				  unsigned long address, unsigned int flags,
+-				  struct pt_regs *regs);
++				  struct pt_regs *regs, bool trace);
+ extern int fixup_user_fault(struct mm_struct *mm,
+ 			    unsigned long address, unsigned int fault_flags,
+ 			    bool *unlocked);
+diff --git a/include/linux/userfaultfd_k.h b/include/linux/userfaultfd_k.h
+index 6b73c9799a1c..dde7103f83f3 100644
+--- a/include/linux/userfaultfd_k.h
++++ b/include/linux/userfaultfd_k.h
+@@ -35,7 +35,7 @@
+ 
+ extern int sysctl_unprivileged_userfaultfd;
+ 
+-extern vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason);
++extern vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason, bool trace);
+ 
+ /*
+  * The mode of operation for __mcopy_atomic and its helpers.
+@@ -155,7 +155,7 @@ extern void userfaultfd_unmap_complete(struct mm_struct *mm,
+ 
+ /* mm helpers */
+ static inline vm_fault_t handle_userfault(struct vm_fault *vmf,
+-				unsigned long reason)
++				unsigned long reason, bool trace)
+ {
+ 	return VM_FAULT_SIGBUS;
+ }
+diff --git a/include/trace/fast.h b/include/trace/fast.h
+index 77730c143325..b5ad1f8cb29a 100644
+--- a/include/trace/fast.h
++++ b/include/trace/fast.h
+@@ -9,8 +9,22 @@
+ 
+ #include <asm/msr.h>
+ 
+-#define ENUMERATE_FAST_TRACEPOINTS(x) \
+-	x(c_entry)		      \
++#define ENUMERATE_FAST_TRACEPOINTS(x)				      \
++	x(c_entry)						      \
++	x(first_try_lock_mm_and_find_vma_start)			      \
++	x(first_try_lock_mm_and_find_vma_end)			      \
++	x(first_try_handle_mm_fault_with_mm_lock_start)		      \
++	x(first_try_handle_mm_fault_with_mm_lock_page_table_walk_end) \
++	x(page_allocation_start)				      \
++	x(page_allocation_end)					      \
++	x(wake_up_userfaultfd_start)				      \
++	x(wake_up_userfaultfd_end)				      \
++	x(first_try_handle_mm_fault_with_mm_lock_end)		      \
++	x(retry_lock_mm_and_find_vma_start)			      \
++	x(retry_lock_mm_and_find_vma_end)			      \
++	x(retry_handle_mm_fault_with_mm_lock_start)		      \
++	x(retry_handle_mm_fault_with_mm_lock_page_table_walk_end)     \
++	x(retry_handle_mm_fault_with_mm_lock_end)		      \
+ 	x(c_exit)
+ 
+ #define DECLARE_FAST_TRACEPOINT(name) extern u64 fast_tracepoint_##name;
+diff --git a/mm/gup.c b/mm/gup.c
+index 118c47447185..8a6808dd360e 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -973,7 +973,7 @@ static int faultin_page(struct vm_area_struct *vma,
+ 		fault_flags |= FAULT_FLAG_TRIED;
+ 	}
+ 
+-	ret = handle_mm_fault(vma, address, fault_flags, NULL);
++	ret = handle_mm_fault(vma, address, fault_flags, NULL, false);
+ 	if (ret & VM_FAULT_ERROR) {
+ 		int err = vm_fault_to_errno(ret, *flags);
+ 
+@@ -1319,7 +1319,7 @@ int fixup_user_fault(struct mm_struct *mm,
+ 	    fatal_signal_pending(current))
+ 		return -EINTR;
+ 
+-	ret = handle_mm_fault(vma, address, fault_flags, NULL);
++	ret = handle_mm_fault(vma, address, fault_flags, NULL, false);
+ 	if (ret & VM_FAULT_ERROR) {
+ 		int err = vm_fault_to_errno(ret, 0);
+ 
+diff --git a/mm/hmm.c b/mm/hmm.c
+index 3af995c814a6..d54b6849cb06 100644
+--- a/mm/hmm.c
++++ b/mm/hmm.c
+@@ -77,7 +77,7 @@ static int hmm_vma_fault(unsigned long addr, unsigned long end,
+ 	}
+ 
+ 	for (; addr < end; addr += PAGE_SIZE)
+-		if (handle_mm_fault(vma, addr, fault_flags, NULL) &
++		if (handle_mm_fault(vma, addr, fault_flags, NULL, false) &
+ 		    VM_FAULT_ERROR)
+ 			return -EFAULT;
+ 	return -EBUSY;
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 9139da4baa39..649c95607c1a 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -640,7 +640,7 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf,
+ 			spin_unlock(vmf->ptl);
+ 			put_page(page);
+ 			pte_free(vma->vm_mm, pgtable);
+-			ret = handle_userfault(vmf, VM_UFFD_MISSING);
++			ret = handle_userfault(vmf, VM_UFFD_MISSING, false);
+ 			VM_BUG_ON(ret & VM_FAULT_FALLBACK);
+ 			return ret;
+ 		}
+@@ -759,7 +759,7 @@ vm_fault_t do_huge_pmd_anonymous_page(struct vm_fault *vmf)
+ 			} else if (userfaultfd_missing(vma)) {
+ 				spin_unlock(vmf->ptl);
+ 				pte_free(vma->vm_mm, pgtable);
+-				ret = handle_userfault(vmf, VM_UFFD_MISSING);
++				ret = handle_userfault(vmf, VM_UFFD_MISSING, false);
+ 				VM_BUG_ON(ret & VM_FAULT_FALLBACK);
+ 			} else {
+ 				set_huge_zero_page(pgtable, vma->vm_mm, vma,
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index 01a685963a99..41dd7ea4774b 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -4887,7 +4887,7 @@ static inline vm_fault_t hugetlb_handle_userfault(struct vm_area_struct *vma,
+ 	hash = hugetlb_fault_mutex_hash(mapping, idx);
+ 	mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+ 	i_mmap_unlock_read(mapping);
+-	return handle_userfault(&vmf, reason);
++	return handle_userfault(&vmf, reason, false);
+ }
+ 
+ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
+diff --git a/mm/ksm.c b/mm/ksm.c
+index a5716fdec1aa..2f890feb8e35 100644
+--- a/mm/ksm.c
++++ b/mm/ksm.c
+@@ -479,7 +479,7 @@ static int break_ksm(struct vm_area_struct *vma, unsigned long addr)
+ 		if (PageKsm(page))
+ 			ret = handle_mm_fault(vma, addr,
+ 					      FAULT_FLAG_WRITE | FAULT_FLAG_REMOTE,
+-					      NULL);
++					      NULL, false);
+ 		else
+ 			ret = VM_FAULT_WRITE;
+ 		put_page(page);
+diff --git a/mm/memory.c b/mm/memory.c
+index 7f6bfa935052..faf9677a36db 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -75,6 +75,7 @@
+ #include <linux/vmalloc.h>
+ 
+ #include <trace/events/kmem.h>
++#include <trace/fast.h>
+ 
+ #include <asm/io.h>
+ #include <asm/mmu_context.h>
+@@ -3033,7 +3034,7 @@ static inline void wp_page_reuse(struct vm_fault *vmf)
+  *   held to the old page, as well as updating the rmap.
+  * - In any case, unlock the PTL and drop the reference we took to the old page.
+  */
+-static vm_fault_t wp_page_copy(struct vm_fault *vmf)
++static vm_fault_t wp_page_copy(struct vm_fault *vmf, bool trace)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+ 	struct mm_struct *mm = vma->vm_mm;
+@@ -3048,13 +3049,21 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
+ 		goto oom;
+ 
+ 	if (is_zero_pfn(pte_pfn(vmf->orig_pte))) {
++		if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++			fast_tracepoint(page_allocation_start);
+ 		new_page = alloc_zeroed_user_highpage_movable(vma,
+ 							      vmf->address);
++		if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++			fast_tracepoint(page_allocation_end);
+ 		if (!new_page)
+ 			goto oom;
+ 	} else {
++		if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++			fast_tracepoint(page_allocation_start);
+ 		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma,
+ 				vmf->address);
++		if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++			fast_tracepoint(page_allocation_end);
+ 		if (!new_page)
+ 			goto oom;
+ 
+@@ -3296,14 +3305,14 @@ static vm_fault_t wp_page_shared(struct vm_fault *vmf)
+  * but allow concurrent faults), with pte both mapped and locked.
+  * We return with mmap_lock still held, but pte unmapped and unlocked.
+  */
+-static vm_fault_t do_wp_page(struct vm_fault *vmf)
++static vm_fault_t do_wp_page(struct vm_fault *vmf, bool trace)
+ 	__releases(vmf->ptl)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+ 
+ 	if (userfaultfd_pte_wp(vma, *vmf->pte)) {
+ 		pte_unmap_unlock(vmf->pte, vmf->ptl);
+-		return handle_userfault(vmf, VM_UFFD_WP);
++		return handle_userfault(vmf, VM_UFFD_WP, trace);
+ 	}
+ 
+ 	/*
+@@ -3328,7 +3337,7 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
+ 			return wp_pfn_shared(vmf);
+ 
+ 		pte_unmap_unlock(vmf->pte, vmf->ptl);
+-		return wp_page_copy(vmf);
++		return wp_page_copy(vmf, trace);
+ 	}
+ 
+ 	/*
+@@ -3366,7 +3375,7 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
+ 	get_page(vmf->page);
+ 
+ 	pte_unmap_unlock(vmf->pte, vmf->ptl);
+-	return wp_page_copy(vmf);
++	return wp_page_copy(vmf, trace);
+ }
+ 
+ static void unmap_mapping_range_vma(struct vm_area_struct *vma,
+@@ -3748,7 +3757,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
+ 	}
+ 
+ 	if (vmf->flags & FAULT_FLAG_WRITE) {
+-		ret |= do_wp_page(vmf);
++		ret |= do_wp_page(vmf, false);
+ 		if (ret & VM_FAULT_ERROR)
+ 			ret &= VM_FAULT_ERROR;
+ 		goto out;
+@@ -3782,7 +3791,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
+  * but allow concurrent faults), and pte mapped but not yet locked.
+  * We return with mmap_lock still held, but pte unmapped and unlocked.
+  */
+-static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
++static vm_fault_t do_anonymous_page(struct vm_fault *vmf, bool trace)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+ 	struct page *page;
+@@ -3827,7 +3836,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+ 		/* Deliver the page fault to userland, check inside PT lock */
+ 		if (userfaultfd_missing(vma)) {
+ 			pte_unmap_unlock(vmf->pte, vmf->ptl);
+-			return handle_userfault(vmf, VM_UFFD_MISSING);
++			return handle_userfault(vmf, VM_UFFD_MISSING, trace);
+ 		}
+ 		goto setpte;
+ 	}
+@@ -3835,7 +3844,11 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+ 	/* Allocate our own private page. */
+ 	if (unlikely(anon_vma_prepare(vma)))
+ 		goto oom;
++	if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++		fast_tracepoint(page_allocation_start);
+ 	page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
++	if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace))
++		fast_tracepoint(page_allocation_end);
+ 	if (!page)
+ 		goto oom;
+ 
+@@ -3870,7 +3883,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+ 	if (userfaultfd_missing(vma)) {
+ 		pte_unmap_unlock(vmf->pte, vmf->ptl);
+ 		put_page(page);
+-		return handle_userfault(vmf, VM_UFFD_MISSING);
++		return handle_userfault(vmf, VM_UFFD_MISSING, trace);
+ 	}
+ 
+ 	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+@@ -4528,13 +4541,13 @@ static inline vm_fault_t wp_huge_pmd(struct vm_fault *vmf)
+ {
+ 	if (vma_is_anonymous(vmf->vma)) {
+ 		if (userfaultfd_huge_pmd_wp(vmf->vma, vmf->orig_pmd))
+-			return handle_userfault(vmf, VM_UFFD_WP);
++			return handle_userfault(vmf, VM_UFFD_WP, false);
+ 		return do_huge_pmd_wp_page(vmf);
+ 	}
+ 
+ 	if (vma_is_dax(vmf->vma)) {
+ 		if (userfaultfd_huge_pmd_wp(vmf->vma, vmf->orig_pmd)) {
+-			return handle_userfault(vmf, VM_UFFD_WP);
++			return handle_userfault(vmf, VM_UFFD_WP, false);
+ 		}
+ 	}
+ 
+@@ -4599,7 +4612,7 @@ static vm_fault_t wp_huge_pud(struct vm_fault *vmf, pud_t orig_pud)
+  * The mmap_lock may have been released depending on flags and our return value.
+  * See filemap_fault() and __lock_page_or_retry().
+  */
+-static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
++static vm_fault_t handle_pte_fault(struct vm_fault *vmf, bool trace)
+ {
+ 	pte_t entry;
+ 
+@@ -4650,9 +4663,16 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+ 		}
+ 	}
+ 
++	if (IS_ENABLED(CONFIG_TRACE_PF) && likely(trace)) {
++		if (vmf->flags & FAULT_FLAG_TRIED)
++			fast_tracepoint(retry_handle_mm_fault_with_mm_lock_page_table_walk_end);
++		else
++			fast_tracepoint(first_try_handle_mm_fault_with_mm_lock_page_table_walk_end);
++	}
++
+ 	if (!vmf->pte) {
+ 		if (vma_is_anonymous(vmf->vma))
+-			return do_anonymous_page(vmf);
++			return do_anonymous_page(vmf, trace);
+ 		else
+ 			return do_fault(vmf);
+ 	}
+@@ -4672,7 +4692,7 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+ 	}
+ 	if (vmf->flags & FAULT_FLAG_WRITE) {
+ 		if (!pte_write(entry))
+-			return do_wp_page(vmf);
++			return do_wp_page(vmf, trace);
+ 		entry = pte_mkdirty(entry);
+ 	}
+ 	entry = pte_mkyoung(entry);
+@@ -4704,7 +4724,8 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
+  * return value.  See filemap_fault() and __lock_page_or_retry().
+  */
+ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
+-		unsigned long address, unsigned int flags)
++		unsigned long address, unsigned int flags,
++		bool trace)
+ {
+ 	struct vm_fault vmf = {
+ 		.vma = vma,
+@@ -4789,7 +4810,7 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
+ 		}
+ 	}
+ 
+-	return handle_pte_fault(&vmf);
++	return handle_pte_fault(&vmf, trace);
+ }
+ 
+ /**
+@@ -4860,7 +4881,7 @@ static inline void mm_account_fault(struct pt_regs *regs,
+  * return value.  See filemap_fault() and __lock_page_or_retry().
+  */
+ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+-			   unsigned int flags, struct pt_regs *regs)
++			   unsigned int flags, struct pt_regs *regs, bool trace)
+ {
+ 	vm_fault_t ret;
+ 
+@@ -4887,7 +4908,7 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+ 	if (unlikely(is_vm_hugetlb_page(vma)))
+ 		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
+ 	else
+-		ret = __handle_mm_fault(vma, address, flags);
++		ret = __handle_mm_fault(vma, address, flags, trace);
+ 
+ 	if (flags & FAULT_FLAG_USER) {
+ 		mem_cgroup_exit_user_fault();
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 431a48e1b90c..377b4ef92a86 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -1846,7 +1846,7 @@ static int shmem_getpage_gfp(struct inode *inode, pgoff_t index,
+ 			unlock_page(page);
+ 			put_page(page);
+ 		}
+-		*fault_type = handle_userfault(vmf, VM_UFFD_MINOR);
++		*fault_type = handle_userfault(vmf, VM_UFFD_MINOR, false);
+ 		return 0;
+ 	}
+ 
+@@ -1888,7 +1888,7 @@ static int shmem_getpage_gfp(struct inode *inode, pgoff_t index,
+ 	 */
+ 
+ 	if (vma && userfaultfd_missing(vma)) {
+-		*fault_type = handle_userfault(vmf, VM_UFFD_MISSING);
++		*fault_type = handle_userfault(vmf, VM_UFFD_MISSING, false);
+ 		return 0;
+ 	}
+ 
+-- 
+2.49.0
+

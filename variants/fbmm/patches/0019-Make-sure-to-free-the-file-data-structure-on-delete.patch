@@ -1,0 +1,24 @@
+From 2f13c69c33ff5f91c6ca8305fbb02de249d125ac Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 27 Oct 2021 15:04:42 -0500
+Subject: [PATCH 019/179] Make sure to free the file data structure on delete
+
+---
+ mm/file_only_mem.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/mm/file_only_mem.c b/mm/file_only_mem.c
+index 6ef1f59fe442..d95d00063d91 100644
+--- a/mm/file_only_mem.c
++++ b/mm/file_only_mem.c
+@@ -200,6 +200,7 @@ static void drop_fom_file(struct fom_mapping *map) {
+ 	map->file->count--;
+ 	if (map->file->count <= 0) {
+ 		delete_fom_file(map->file->f);
++		fput(map->file->f);
+ 		vfree(map->file);
+ 		map->file = NULL;
+ 	}
+-- 
+2.49.0
+

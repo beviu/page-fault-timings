@@ -1,0 +1,23 @@
+From 50673e64ee13d078910cdea6c64e5b8532a2ad36 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <bijan311@gmail.com>
+Date: Wed, 13 Apr 2022 13:44:11 -0500
+Subject: [PATCH 038/179] Remove the --pmem_size option from the setup script
+
+It was moved to the experiment subprogram instead of the setup
+---
+ kernel_options | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel_options b/kernel_options
+index 443b8bbb6911..beb327300080 100644
+--- a/kernel_options
++++ b/kernel_options
+@@ -57,4 +57,4 @@ CONFIG_VIRTIO_NET=y
+ CONFIG_ISO9660_FS=m
+ CONFIG_EXT4_FS=y
+ 
+-"setup_wkspc {MACHINE} {USER} --clone_wkspc --git_user BijanT --host_bmks --host_dep --unstable_device_names --resize_root --pmem_size 30 --secret {TOKEN} --spec_2017 /p/multifacet/infrastructure/spec2017.iso" "setup_kernel {MACHINE} {USER} --branch dev --repo github.com/BijanT/linux-file-only-mem --git_user BijanT --secret {TOKEN} --install_perf +CONFIG_TRANSPARENT_HUGEPAGE +CONFIG_MM_ECON -CONFIG_PAGE_TABLE_ISOLATION -CONFIG_RETPOLINE +CONFIG_GDB_SCRIPTS +CONFIG_FRAME_POINTERS +CONFIG_IKHEADERS +CONFIG_SLAB_FREELIST_RANDOM +CONFIG_SHUFFLE_PAGE_ALLOCATOR +CONFIG_FS_DAX +CONFIG_DAX +CONFIG_BLK_DEV_RAM +CONFIG_FILE_ONLY_MEM +CONFIG_BLK_DEV_PMEM +CONFIG_ND_BLK +CONFIG_BTT +CONFIG_NVDIMM_PFN +CONFIG_NVDIMM_DAX +CONFIG_X86_PMEM_LEGACY -CONFIG_INIT_ON_ALLOC_DEFAULT_ON"
++"setup_wkspc {MACHINE} {USER} --clone_wkspc --git_user BijanT --host_bmks --host_dep --unstable_device_names --resize_root --secret {TOKEN} --spec_2017 /p/multifacet/infrastructure/spec2017.iso" "setup_kernel {MACHINE} {USER} --branch dev --repo github.com/BijanT/linux-file-only-mem --git_user BijanT --secret {TOKEN} --install_perf +CONFIG_TRANSPARENT_HUGEPAGE +CONFIG_MM_ECON -CONFIG_PAGE_TABLE_ISOLATION -CONFIG_RETPOLINE +CONFIG_GDB_SCRIPTS +CONFIG_FRAME_POINTERS +CONFIG_IKHEADERS +CONFIG_SLAB_FREELIST_RANDOM +CONFIG_SHUFFLE_PAGE_ALLOCATOR +CONFIG_FS_DAX +CONFIG_DAX +CONFIG_BLK_DEV_RAM +CONFIG_FILE_ONLY_MEM +CONFIG_BLK_DEV_PMEM +CONFIG_ND_BLK +CONFIG_BTT +CONFIG_NVDIMM_PFN +CONFIG_NVDIMM_DAX +CONFIG_X86_PMEM_LEGACY -CONFIG_INIT_ON_ALLOC_DEFAULT_ON"
+-- 
+2.49.0
+

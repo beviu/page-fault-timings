@@ -1,0 +1,1022 @@
+From d925477899f3f6848c37493941207998148a0ae9 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Wed, 1 May 2024 13:00:15 -0500
+Subject: [PATCH 163/179] FBMM: Get CoW working
+
+---
+ BasicMMFS/basic.c             |  98 ++++++++++++------
+ BasicMMFS/basic.h             |   2 +
+ include/linux/file_based_mm.h |  42 ++++++--
+ include/linux/fs.h            |   1 +
+ include/linux/mm.h            |   2 +-
+ include/linux/sched.h         |   1 +
+ kernel/exit.c                 |   6 +-
+ kernel/fork.c                 |  60 ++++++++---
+ mm/fbmm_helpers.c             | 127 +++++++++++++++++++++++
+ mm/file_based_mm.c            | 184 ++++++++++++++++++++++++----------
+ mm/gup.c                      |   2 +-
+ mm/mmap.c                     |  17 +---
+ mm/rmap.c                     |   1 +
+ 13 files changed, 417 insertions(+), 126 deletions(-)
+
+diff --git a/BasicMMFS/basic.c b/BasicMMFS/basic.c
+index bf05666eeb82..d1b9500655fa 100644
+--- a/BasicMMFS/basic.c
++++ b/BasicMMFS/basic.c
+@@ -14,6 +14,9 @@
+ #include <linux/file_based_mm.h>
+ #include <linux/swap.h>
+ #include <linux/swapops.h>
++#include <linux/pagevec.h>
++
++#include <asm/tlbflush.h>
+ 
+ #include "basic.h"
+ 
+@@ -127,36 +130,22 @@ void basicmmfs_free_range(struct inode *inode, u64 offset, loff_t len)
+ {
+     struct basicmmfs_sb_info *sbi = BMMFS_SB(inode->i_sb);
+     struct basicmmfs_inode_info *inode_info = BMMFS_I(inode);
+-    struct vm_area_struct *vma;
+-    struct mm_walk_ops walk_ops = {
+-        .pte_entry = basicmmfs_free_pte,
+-    };
+-    struct mm_struct *mm = current->mm;
+-    u64 start_addr = inode_info->file_va_start + offset;
+-    u64 end_addr = start_addr + len;
+-    u64 cur_addr = start_addr;
+-    u64 cur_end;
+-
+-	while (cur_addr < end_addr) {
+-        vma = find_vma(mm, cur_addr);
+-        if (!vma)
+-            break;
+-
+-        // Make sure this VMA maps this file
+-        if (!vma->vm_file || vma->vm_file->f_inode != inode) {
+-            cur_addr = vma->vm_end;
+-            continue;
++    struct address_space *mapping = inode_info->mapping;
++    struct folio_batch fbatch;
++    int i;
++    pgoff_t cur_offset = offset;
++    pgoff_t end_offset = offset + len;
++
++    folio_batch_init(&fbatch);
++    while (cur_offset < end_offset) {
++        filemap_get_folios(mapping, &cur_offset, end_offset, &fbatch);
++
++        for (i = 0; i < fbatch.nr; i++) {
++            basicmmfs_return_page(folio_page(fbatch.folios[i], 0), sbi);
+         }
+ 
+-        if (vma->vm_end < end_addr)
+-            cur_end = vma->vm_end;
+-        else
+-            cur_end = end_addr;
+-
+-        walk_page_range(current->mm, cur_addr, cur_end, &walk_ops, sbi);
+-
+-        cur_addr = vma->vm_end;
+-	}
++        folio_batch_release(&fbatch);
++    }
+ }
+ 
+ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+@@ -166,9 +155,10 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     struct inode *inode = vma->vm_file->f_inode;
+     struct basicmmfs_inode_info *inode_info;
+     struct basicmmfs_sb_info *sbi;
+-    struct page *page;
++    struct page *page = NULL;
+     bool new_page = false;
+     bool swap_page = false;
++    bool cow_fault = false;
+     u64 pgoff = ((vmf->address - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+     vm_fault_t ret = 0;
+     pte_t entry;
+@@ -184,9 +174,14 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     vmf->pte = pte_offset_map(vmf->pmd, vmf->address);
+     vmf->orig_pte = *vmf->pte;
+     if (!pte_none(vmf->orig_pte) && pte_present(vmf->orig_pte)) {
+-        // It looks like the PTE is already populated, so just return
+-        ret = VM_FAULT_NOPAGE;
+-        goto unmap;
++        if (!(vmf->flags & FAULT_FLAG_WRITE)) {
++            // It looks like the PTE is already populated,
++            // so maybe two threads raced to first fault.
++            ret = VM_FAULT_NOPAGE;
++            goto unmap;
++        }
++
++        cow_fault = true;
+     }
+ 
+     // Get the page if it already allocated
+@@ -232,6 +227,42 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+         goto unlock;
+     }
+ 
++    // Handle COW fault
++    if (cow_fault) {
++        u8 *src_kaddr, *dst_kaddr;
++        struct page *old_page;
++        unsigned long old_pfn;
++
++        old_pfn = pte_pfn(vmf->orig_pte);
++        old_page = pfn_to_page(old_pfn);
++
++        lock_page(old_page);
++
++        // If there's more than one reference to this page, we need to copy it.
++        // Otherwise, we can just reuse it
++        if (page_mapcount(old_page) > 1) {
++            // Actually copy the page
++            src_kaddr = kmap(old_page);
++            dst_kaddr = kmap(page);
++            memcpy(dst_kaddr, src_kaddr, PAGE_SIZE);
++            kunmap(page);
++            kunmap(old_page);
++
++            // The old page is unmapped, so we can drop the reference
++            page_remove_rmap(old_page, vma, false);
++        } else {
++            basicmmfs_return_page(page, sbi);
++            page = old_page;
++        }
++        // Drop a reference to old_page even if we are going to keep it
++        // because the reference will be increased at the end of the fault
++        put_page(old_page);
++        // Decrease the filepage count for the same reason
++        percpu_counter_dec(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
++
++        unlock_page(old_page);
++    }
++
+     if (new_page || swap_page)
+         __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
+ 
+@@ -250,6 +281,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
+     update_mmu_cache(vma, vmf->address, vmf->pte);
+     vmf->page = page;
+     get_page(page);
++    flush_tlb_page(vma, vmf->address);
+     ret = VM_FAULT_NOPAGE;
+ 
+ unlock:
+@@ -273,6 +305,7 @@ static int basicmmfs_mmap(struct file *file, struct vm_area_struct *vma)
+     vma->vm_ops = &basicmmfs_vm_ops;
+ 
+     inode_info->file_va_start = vma->vm_start - (vma->vm_pgoff << PAGE_SHIFT);
++    inode_info->mapping = file->f_mapping;
+ 
+     return 0;
+ }
+@@ -543,6 +576,7 @@ static const struct super_operations basicmmfs_ops = {
+     .show_options = basicmmfs_show_options,
+     .nr_cached_objects = basicmmfs_nr_cached_objects,
+     .free_cached_objects = basicmmfs_free_cached_objects,
++    .copy_page_range = fbmm_copy_page_range,
+ };
+ 
+ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
+diff --git a/BasicMMFS/basic.h b/BasicMMFS/basic.h
+index ff576ab3c0a3..cc54b392331d 100644
+--- a/BasicMMFS/basic.h
++++ b/BasicMMFS/basic.h
+@@ -22,6 +22,8 @@ struct basicmmfs_inode_info {
+     struct maple_tree falloc_mt;
+     // The first virtual address this file is associated with.
+     u64 file_va_start;
++    // The file offset to folio mapping from the file
++    struct address_space *mapping;
+ };
+ 
+ #endif //BASIC_MMFS_H
+diff --git a/include/linux/file_based_mm.h b/include/linux/file_based_mm.h
+index d9ce56d42826..be5fafdfb6aa 100644
+--- a/include/linux/file_based_mm.h
++++ b/include/linux/file_based_mm.h
+@@ -2,27 +2,44 @@
+ #define _FILE_BASED_MM_H_
+ 
+ #include <linux/types.h>
++#include <linux/mm_types.h>
+ #include <linux/fs.h>
++#include <linux/maple_tree.h>
++
++struct fbmm_proc {
++	char *mnt_dir_str;
++	struct path mnt_dir_path;
++	// This file exists just to be passed to get_unmapped_area in mmap
++	struct file *get_unmapped_area_file;
++	struct maple_tree files_mt;
++	struct list_head cow_files;
++	atomic_t refcount;
++};
+ 
+-#ifdef CONFIG_FILE_BASED_MM
+ 
++#ifdef CONFIG_FILE_BASED_MM
+ extern const struct file_operations proc_fbmm_mnt_dir;
+ 
+-bool use_file_based_mm(pid_t pid);
++bool use_file_based_mm(struct task_struct *task);
++bool fbmm_enabled(void);
+ 
+ bool is_vm_fbmm_page(struct vm_area_struct *vma);
+ int fbmm_fault(struct vm_area_struct *vma, unsigned long address, unsigned int flags);
+ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags);
+-struct file *fbmm_get_file(unsigned long addr, unsigned long len, unsigned long prot, int flags, bool mmap, unsigned long *pgoff);
++struct file *fbmm_get_file(struct task_struct *tsk,unsigned long addr, unsigned long len,
++	unsigned long prot, int flags, bool mmap, unsigned long *pgoff);
+ void fbmm_populate_file(unsigned long start, unsigned long len);
+-int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len);
+-void fbmm_check_exiting_proc(pid_t pid);
+-int fbmm_copy_mnt_dir(pid_t src, pid_t dst);
++int fbmm_munmap(struct task_struct *tsk, unsigned long start, unsigned long len);
++void fbmm_exit(struct task_struct *tsk);
++int fbmm_copy(struct task_struct *src_tsk, struct task_struct *dst_tsk);
++void fbmm_add_cow_file(struct task_struct *new_tsk, struct task_struct *old_tsk,
++	struct file *file, unsigned long start);
+ 
+ // FBMM Helper functions for MFSs
+ bool fbmm_swapout_folio(struct folio *folio);
+ int fbmm_writepage(struct page *page, struct writeback_control *wbc);
+ struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff, struct page *page);
++int fbmm_copy_page_range(struct vm_area_struct *dst, struct vm_area_struct *src);
+ 
+ #else //CONFIG_FILE_BASED_MM
+ 
+@@ -42,23 +59,28 @@ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len, unsi
+ 	return 0;
+ }
+ 
+-inline struct file *fbmm_get_file(unsigned long addr, unsigned long len, unsigned long prot, int flags, bool mmap, unsigned long *pgoff) {
++inline struct file *fbmm_get_file(struct task_struct *tsk, unsigned long addr, unsigned long len, unsigned long prot,
++        int flags, bool mmap, unsigned long *pgoff) {
+ 	return NULL;
+ }
+ 
+ inline void fbmm_populate_file(unsigned long start, unsigned long len)
+ {}
+ 
+-inline int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
++inline int fbmm_munmap(struct task_struct *tsk, unsigned long start, unsigned long len) {
+ 	return 0;
+ }
+ 
+-inline void fbmm_check_exiting_proc(pid_t pid) {}
++inline void fbmm_exit(struct task_struct *tsk) {}
+ 
+-int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
++int fbmm_copy(struct task_struct *tsk, struct task_struct *tsk) {
+ 	return 0;
+ }
+ 
++void fbmm_add_cow_file(struct task_struct *new_tsk, struct task_struct *old_tsk,
++	struct file *file, unsigned long start) {
++
++}
+ #endif //CONFIG_FILE_BASED_MM
+ 
+ #endif //__FILE_BASED_MM_H
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index c1769a2c5d70..e2767138c2ed 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -2253,6 +2253,7 @@ struct super_operations {
+ 				  struct shrink_control *);
+ 	long (*free_cached_objects)(struct super_block *,
+ 				    struct shrink_control *);
++	int (*copy_page_range)(struct vm_area_struct *dst, struct vm_area_struct *src);
+ };
+ 
+ /*
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 1ab2cfefb94d..e572c79f33d4 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -322,7 +322,7 @@ extern unsigned int kobjsize(const void *objp);
+ #define VM_HIGH_ARCH_BIT_2	34	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_BIT_3	35	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_BIT_4	36	/* bit only usable on 64-bit architectures */
+-#define VM_HIGH_ARCH_BIT_5	37	/* bit only usable on 64-bit architectures */
++#define VM_HIGH_ARCH_BIT_5	38	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_0	BIT(VM_HIGH_ARCH_BIT_0)
+ #define VM_HIGH_ARCH_1	BIT(VM_HIGH_ARCH_BIT_1)
+ #define VM_HIGH_ARCH_2	BIT(VM_HIGH_ARCH_BIT_2)
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index e8a4ef020447..eef3a45f1387 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1522,6 +1522,7 @@ struct task_struct {
+ 	union rv_task_monitor		rv[RV_PER_TASK_MONITORS];
+ #endif
+ 
++	struct fbmm_proc *fbmm_proc;
+ 	/*
+ 	 * New fields for task_struct should be added above here, so that
+ 	 * they are included in the randomized portion of task_struct.
+diff --git a/kernel/exit.c b/kernel/exit.c
+index f224db3b1771..412d33e2dcb7 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -852,11 +852,7 @@ void __noreturn do_exit(long code)
+ 		}
+ 	}
+ 
+-
+-	// Bijan: When a process exits, check if we should delete its FOM files
+-	// We only care if the main thread exits, so check against tsk->pid
+-	// instead of tsk->tgid
+-	fbmm_check_exiting_proc(tsk->pid);
++	fbmm_exit(tsk);
+ 
+ 	kcov_task_exit(tsk);
+ 	kmsan_task_exit(tsk);
+diff --git a/kernel/fork.c b/kernel/fork.c
+index ecd6bbd7e11b..c3cd340f815d 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -579,8 +579,8 @@ static void dup_mm_exe_file(struct mm_struct *mm, struct mm_struct *oldmm)
+ }
+ 
+ #ifdef CONFIG_MMU
+-static __latent_entropy int dup_mmap(struct mm_struct *mm,
+-					struct mm_struct *oldmm)
++static __latent_entropy int dup_mmap(struct task_struct *tsk,
++					struct mm_struct *mm, struct mm_struct *oldmm)
+ {
+ 	struct vm_area_struct *mpnt, *tmp;
+ 	int retval;
+@@ -663,7 +663,32 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
+ 			goto fail_nomem_anon_vma_fork;
+ 		tmp->vm_flags &= ~(VM_LOCKED | VM_LOCKONFAULT);
+ 		file = tmp->vm_file;
+-		if (file) {
++		if (file && use_file_based_mm(tsk) && (tmp->vm_flags & (VM_SHARED | VM_FBMM)) == VM_FBMM) {
++			// If this is a private FBMM file, we need to create a new file for this allocation
++			unsigned long len = tmp->vm_end - tmp->vm_start;
++			unsigned long prot;
++			unsigned long pgoff;
++			struct file *orig_file = file;
++
++			// PROT_READ/WRITE/EXEC have the same values as VM_READ/WRITE/EXEC
++			prot = tmp->vm_flags & (VM_READ | VM_WRITE | VM_EXEC);
++			// "true" for mmap may be incorrect, but if it's wrong, it'll only
++			// affect the next brk allocation
++			file = fbmm_get_file(tsk, tmp->vm_start, len, prot, 0, true, &pgoff);
++			if (!file) {
++				pr_err("Failed to create new file for fork. I don't know what to do here!\n");
++				BUG();
++			}
++
++			tmp->vm_pgoff = pgoff;
++			tmp->vm_file = get_file(file);
++			if (call_mmap(file, tmp)) {
++				pr_err("Error calling mmap for FBMM file during fork\n");
++			}
++
++			// Add the original file to the new proc's list of cow FBMM files
++			fbmm_add_cow_file(tsk, current, orig_file, tmp->vm_start);
++		} else if (file) {
+ 			struct address_space *mapping = file->f_mapping;
+ 
+ 			get_file(file);
+@@ -692,8 +717,12 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
+ 			goto fail_nomem_mas_store;
+ 
+ 		mm->map_count++;
+-		if (!(tmp->vm_flags & VM_WIPEONFORK))
+-			retval = copy_page_range(tmp, mpnt);
++		if (!(tmp->vm_flags & VM_WIPEONFORK)) {
++			if (file && file->f_inode->i_sb->s_op->copy_page_range)
++				retval = file->f_inode->i_sb->s_op->copy_page_range(tmp, mpnt);
++			else
++				retval = copy_page_range(tmp, mpnt);
++		}
+ 
+ 		if (tmp->vm_ops && tmp->vm_ops->open)
+ 			tmp->vm_ops->open(tmp);
+@@ -1568,7 +1597,7 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
+ 	if (!mm_init(mm, tsk, mm->user_ns))
+ 		goto fail_nomem;
+ 
+-	err = dup_mmap(mm, oldmm);
++	err = dup_mmap(tsk, mm, oldmm);
+ 	if (err)
+ 		goto free_pt;
+ 
+@@ -2132,6 +2161,19 @@ static __latent_entropy struct task_struct *copy_process(
+ 		siginitsetinv(&p->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
+ 	}
+ 
++	// TODO pass clone flags to fbmm_copy and do this logic there
++	if (clone_flags & CLONE_THREAD) {
++		// If the new task is just a thread, not a new proc, just copy fbmm info
++		p->fbmm_proc = current->fbmm_proc;
++	} if (use_file_based_mm(current)) {
++		// Copy the default fbmm mount dir on fork
++		if (fbmm_copy(current, p)) {
++			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
++		}
++	} else {
++		p->fbmm_proc = NULL;
++	}
++
+ 	p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? args->child_tid : NULL;
+ 	/*
+ 	 * Clear TID on mm_release()?
+@@ -2736,12 +2778,6 @@ pid_t kernel_clone(struct kernel_clone_args *args)
+ 	p->total_dtlb_misses = 0;
+ 	p->total_dtlb_4k_misses = 0;
+ 	p->total_dtlb_hugetlb_misses = 0;
+-	// Copy the default fbmm mount dir on fork
+-	if (use_file_based_mm(current->tgid)) {
+-		if (fbmm_copy_mnt_dir(current->tgid, p->tgid)) {
+-			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
+-		}
+-	}
+ 	wake_up_new_task(p);
+ 
+ 	/* forking complete and child started to run, tell ptracer */
+diff --git a/mm/fbmm_helpers.c b/mm/fbmm_helpers.c
+index 133627d1a57d..6b49020b3766 100644
+--- a/mm/fbmm_helpers.c
++++ b/mm/fbmm_helpers.c
+@@ -9,10 +9,16 @@
+ #include <linux/frontswap.h>
+ #include <linux/mmu_notifier.h>
+ #include <linux/swap_slots.h>
++#include <linux/pagewalk.h>
++
++#include <asm/tlbflush.h>
+ 
+ #include "internal.h"
+ #include "swap.h"
+ 
++///////////////////////////////////////////////////////////////////////////////
++// Swap Helpers
++///////////////////////////////////////////////////////////////////////////////
+ static bool fbmm_try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
+ 				unsigned long address, void *arg)
+ {
+@@ -281,3 +287,124 @@ struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsig
+ 	return folio_page(folio, 0);
+ }
+ EXPORT_SYMBOL(fbmm_read_swap_entry);
++
++///////////////////////////////////////////////////////////////////////////////
++// Copy on write helpers
++///////////////////////////////////////////////////////////////////////////////
++struct page_walk_levels {
++	struct vm_area_struct *vma;
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++};
++
++int fbmm_copy_pgd(pgd_t *pgd, unsigned long addr, unsigned long next,
++		struct mm_walk *walk) {
++	struct page_walk_levels *dst_levels = walk->private;
++
++	dst_levels->pgd = pgd_offset(dst_levels->vma->vm_mm, addr);
++	return 0;
++}
++
++int fbmm_copy_p4d(p4d_t *p4d, unsigned long addr, unsigned long next,
++		struct mm_walk *walk) {
++	struct page_walk_levels *dst_levels = walk->private;
++
++	dst_levels->p4d = p4d_alloc(dst_levels->vma->vm_mm, dst_levels->pgd, addr);
++	if (!dst_levels->p4d)
++		return -ENOMEM;
++	return 0;
++}
++
++int fbmm_copy_pud(pud_t *pud, unsigned long addr, unsigned long next,
++		struct mm_walk *walk) {
++	struct page_walk_levels *dst_levels = walk->private;
++
++	dst_levels->pud = pud_alloc(dst_levels->vma->vm_mm, dst_levels->p4d, addr);
++	if (!dst_levels->pud)
++		return -ENOMEM;
++	return 0;
++}
++
++int fbmm_copy_pmd(pmd_t *pmd, unsigned long addr, unsigned long next,
++		struct mm_walk *walk) {
++	struct page_walk_levels *dst_levels = walk->private;
++
++	dst_levels->pmd = pmd_alloc(dst_levels->vma->vm_mm, dst_levels->pud, addr);
++	if (!dst_levels->pmd)
++		return -ENOMEM;
++	return 0;
++}
++
++int fbmm_copy_pte(pte_t *pte, unsigned long addr, unsigned long next,
++		struct mm_walk *walk) {
++	struct page_walk_levels *dst_levels = walk->private;
++	struct mm_struct *dst_mm = dst_levels->vma->vm_mm;
++	struct mm_struct *src_mm = walk->mm;
++	pte_t *src_pte = pte;
++	pte_t *dst_pte;
++	spinlock_t *dst_ptl;
++	pte_t entry;
++	struct page *page;
++	struct folio *folio;
++	int ret = 0;
++
++	dst_pte = pte_alloc_map(dst_mm, dst_levels->pmd, addr);
++	if (!dst_pte) {
++		return -ENOMEM;
++	}
++	dst_ptl = pte_lockptr(dst_mm, dst_levels->pmd);
++	// The spinlock for the src pte should already be taken
++	spin_lock_nested(dst_ptl, SINGLE_DEPTH_NESTING);
++
++	if (pte_none(*src_pte))
++		goto unlock;
++
++	// I don't really want to handle to swap case, so I won't for now
++	if (unlikely(!pte_present(*src_pte))) {
++		pr_alert("Can't copy swapped out FBMM page on fork!\n");
++		ret = -EIO;
++		goto unlock;
++	}
++
++	// Figure out what the page we care about is
++	entry = ptep_get(src_pte);
++	page = vm_normal_page(walk->vma, addr, entry);
++	if (page)
++		folio = page_folio(page);
++
++	folio_get(folio);
++	page_dup_file_rmap(page, false);
++    percpu_counter_inc(&dst_mm->rss_stat[MM_FILEPAGES]);
++
++	if (!(walk->vma->vm_flags & VM_SHARED) && pte_write(entry)) {
++		ptep_set_wrprotect(src_mm, addr, src_pte);
++		entry = pte_wrprotect(entry);
++	}
++
++	entry = pte_mkold(entry);
++	set_pte_at(dst_mm, addr, dst_pte, entry);
++
++unlock:
++	pte_unmap_unlock(dst_pte, dst_ptl);
++	return ret;
++}
++
++int fbmm_copy_page_range(struct vm_area_struct *dst, struct vm_area_struct *src) {
++	struct page_walk_levels dst_levels;
++	struct mm_walk_ops walk_ops = {
++		.pgd_entry = fbmm_copy_pgd,
++		.p4d_entry = fbmm_copy_p4d,
++		.pud_entry = fbmm_copy_pud,
++		.pmd_entry = fbmm_copy_pmd,
++		.pte_entry = fbmm_copy_pte,
++	};
++
++	dst_levels.vma = dst;
++
++	return walk_page_range(src->vm_mm, src->vm_start, src->vm_end,
++		&walk_ops, &dst_levels);
++}
++EXPORT_SYMBOL(fbmm_copy_page_range);
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 67ffd1c13635..1cc4579d9279 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -31,25 +31,15 @@ struct fbmm_file {
+ 	unsigned long va_start;
+ 	// The ending virtual address assigned to this file (exclusive)
+ 	unsigned long va_end;
+-};
+-
+-struct fbmm_proc {
+-	pid_t pid;
+-	char *mnt_dir_str;
+-	struct path mnt_dir_path;
+-	// This file exists just to be passed to get_unmapped_area in mmap
+-	struct file *get_unmapped_area_file;
+-	struct maple_tree files_mt;
+-	bool in_work_queue;
+ 	atomic_t refcount;
+ };
+ 
++struct fbmm_cow_list_entry {
++	struct list_head node;
++	struct fbmm_file *file;
++};
+ 
+ static enum file_based_mm_state fbmm_state = FBMM_OFF;
+-static DECLARE_RWSEM(fbmm_procs_sem);
+-// This is used to store the default fbmm mount directories for each proc.
+-// An entry for a pid exists in this tree iff the process of that pid is using FBMM.
+-static struct maple_tree fbmm_proc_mt = MTREE_INIT(fbmm_proc_mt, 0);
+ 
+ static DEFINE_SPINLOCK(stats_lock);
+ static u64 file_create_time = 0;
+@@ -64,7 +54,7 @@ static int fbmm_prealloc_map_populate = 1;
+ ///////////////////////////////////////////////////////////////////////////////
+ // struct fbmm_proc functions
+ 
+-static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
++static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str) {
+ 	const int OPEN_FLAGS = O_EXCL | O_TMPFILE | O_RDWR;
+ 	const umode_t OPEN_MODE = S_IFREG | S_IRUSR | S_IWUSR;
+ 	struct fbmm_proc *proc;
+@@ -81,10 +71,9 @@ static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
+ 	if (IS_ERR(proc->get_unmapped_area_file)) {
+ 		pr_err("fbmm_create_new_proc: Could not create the get_unmapped_area_file\n");
+ 	}
+-	proc->pid = pid;
+ 	mt_init(&proc->files_mt);
+-	proc->in_work_queue = false;
+ 	atomic_set(&proc->refcount, 1);
++	INIT_LIST_HEAD(&proc->cow_files);
+ 
+ 	return proc;
+ }
+@@ -103,9 +92,19 @@ static void fbmm_put_proc(struct fbmm_proc *proc) {
+ // Helper functions
+ 
+ static void drop_fbmm_file(struct fbmm_file *file) {
+-	filp_close(file->f, current->files);
+-	fput(file->f);
+-	kfree(file);
++	// Only free if this is the last proc dropping the file
++	if (atomic_dec_return(&file->refcount) == 0) {
++		vfs_fallocate(file->f,
++				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
++				0, FBMM_DEFAULT_FILE_SIZE);
++		filp_close(file->f, current->files);
++		fput(file->f);
++		kfree(file);
++	}
++}
++
++static void get_fbmm_file(struct fbmm_file *file) {
++	atomic_inc(&file->refcount);
+ }
+ 
+ static pmdval_t fbmm_alloc_pmd(struct vm_fault *vmf) {
+@@ -155,11 +154,15 @@ int fbmm_fault(struct vm_area_struct *vma, unsigned long address, unsigned int f
+ 	return vma->vm_ops->fault(&vmf);
+ }
+ 
+-bool use_file_based_mm(pid_t pid) {
++bool fbmm_enabled() {
++	return fbmm_state != FBMM_OFF;
++}
++
++bool use_file_based_mm(struct task_struct *tsk) {
+ 	if (fbmm_state == FBMM_OFF) {
+ 		return false;
+ 	} if (fbmm_state == FBMM_SELECTED_PROCS) {
+-		return mtree_load(&fbmm_proc_mt, pid) != NULL;
++		return tsk->fbmm_proc != NULL;
+ 	} else if (fbmm_state == FBMM_ALL) {
+ 		return true;
+ 	}
+@@ -173,7 +176,7 @@ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len,
+ {
+ 	struct fbmm_proc *proc;
+ 
+-	proc = mtree_load(&fbmm_proc_mt, current->tgid);
++	proc = current->fbmm_proc;
+ 	if (!proc) {
+ 		return -EINVAL;
+ 	}
+@@ -181,7 +184,7 @@ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len,
+ 	return get_unmapped_area(proc->get_unmapped_area_file, addr, len, pgoff, flags);
+ }
+ 
+-struct file *fbmm_get_file(unsigned long addr, unsigned long len,
++struct file *fbmm_get_file(struct task_struct *tsk, unsigned long addr, unsigned long len,
+ 		unsigned long prot, int flags, bool mmap, unsigned long *pgoff) {
+ 	struct file *f;
+ 	struct fbmm_file *fbmm_file;
+@@ -194,7 +197,7 @@ struct file *fbmm_get_file(unsigned long addr, unsigned long len,
+ 	u64 start_time = rdtsc();
+ 	u64 end_time;
+ 
+-	proc = mtree_load(&fbmm_proc_mt, current->tgid);
++	proc = tsk->fbmm_proc;
+ 	if (!proc) {
+ 		return NULL;
+ 	}
+@@ -255,6 +258,7 @@ struct file *fbmm_get_file(unsigned long addr, unsigned long len,
+ 		return NULL;
+ 	}
+ 	fbmm_file->f = f;
++	atomic_set(&fbmm_file->refcount, 1);
+ 	if (mmap) {
+ 		// Since VAs in the mmap region typically grow down,
+ 		// this mapping will be the "end" of the file
+@@ -289,7 +293,7 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
+ 	u64 start_time = rdtsc();
+ 	u64 end_time;
+ 
+-	proc = mtree_load(&fbmm_proc_mt, current->tgid);
++	proc = current->fbmm_proc;
+ 	// Create the proc data structure if it does not already exist
+ 	if (!proc) {
+ 		return;
+@@ -312,7 +316,7 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
+ 	return;
+ }
+ 
+-int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
++int fbmm_munmap(struct task_struct *tsk, unsigned long start, unsigned long len) {
+ 	struct fbmm_proc *proc = NULL;
+ 	struct fbmm_file *fbmm_file = NULL;
+ 	struct fbmm_file *prev_file = NULL;
+@@ -322,8 +326,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 	u64 start_time = rdtsc();
+ 	u64 end_time;
+ 
+-	proc = mtree_load(&fbmm_proc_mt, pid);
+-
++	proc = tsk->fbmm_proc;
+ 	if (!proc)
+ 		return 0;
+ 
+@@ -362,9 +365,18 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 		BUG_ON(falloc_start_offset > falloc_end_offset);
+ 		falloc_len = falloc_end_offset - falloc_start_offset;
+ 
+-		ret = vfs_fallocate(fbmm_file->f,
+-				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+-				falloc_start_offset, falloc_len);
++		/* 
++		 * Because shared mappings via fork are hard, only fallocate
++		 * if there is only one proc using this file.
++		 * It would be nice to be able to free the memory if all procs sharing
++		 * the file have unmapped it, but that would require tracking usage
++		 * at a page granularity.
++		 */
++		if (atomic_read(&fbmm_file->refcount) == 1) {
++			ret = vfs_fallocate(fbmm_file->f,
++					FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
++					falloc_start_offset, falloc_len);
++		}
+ 
+ 		fbmm_file = mt_next(&proc->files_mt, fbmm_file->va_start, ULONG_MAX);
+ 		if (!fbmm_file || fbmm_file->va_end <= start)
+@@ -381,55 +393,119 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 	return ret;
+ }
+ 
+-void fbmm_check_exiting_proc(pid_t pid) {
++void fbmm_exit(struct task_struct *tsk) {
+ 	struct fbmm_proc *proc;
+ 	struct fbmm_file *file;
++	struct fbmm_cow_list_entry *cow_entry, *tmp;
+ 	unsigned long index = 0;
+ 
+-	proc = mtree_erase(&fbmm_proc_mt, pid);
+-
++	proc = tsk->fbmm_proc;
+ 	if (!proc)
+ 		return;
+ 
+ 	mt_for_each(&proc->files_mt, file, index, ULONG_MAX) {
+-		vfs_fallocate(file->f,
+-				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+-				0, FBMM_DEFAULT_FILE_SIZE);
+ 		drop_fbmm_file(file);
+ 	}
+ 	mtree_destroy(&proc->files_mt);
+ 
++	list_for_each_entry_safe(cow_entry, tmp, &proc->cow_files, node) {
++		list_del(&cow_entry->node);
++
++		drop_fbmm_file(cow_entry->file);
++		kfree(cow_entry);
++	}
++
+ 	fbmm_put_proc(proc);
+ }
+ 
+-// Make the default mmfs dir of the dst the same as src
+-int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
++int fbmm_copy(struct task_struct *src_tsk, struct task_struct *dst_tsk) {
+ 	struct fbmm_proc *proc;
+-	struct fbmm_proc *new_proc;
++	struct fbmm_cow_list_entry *src_cow, *dst_cow;
+ 	char *buffer;
+ 	char *src_dir;
+ 	size_t len;
+ 
+-	// noop
+-	if (src == dst)
+-		return 0;
+-
+ 	// Does the src actually have a default mnt dir
+-	proc = mtree_load(&fbmm_proc_mt, src);
++	proc = src_tsk->fbmm_proc;
+ 	if (!proc)
+ 		return -1;
+ 
++	// Make a new fbmm_proc with the same mnt dir
+ 	src_dir = proc->mnt_dir_str;
+ 
+ 	len = strnlen(src_dir, PATH_MAX);
+ 	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
+ 	strncpy(buffer, src_dir, len + 1);
+ 
+-	new_proc = fbmm_create_new_proc(buffer, dst);
++	dst_tsk->fbmm_proc = fbmm_create_new_proc(buffer);
++    if (!dst_tsk->fbmm_proc) {
++        return -1;
++    }
++
++	// If the source has CoW files, they may also be CoW files in the destination
++	// so we need to copy that too.
++	list_for_each_entry(src_cow, &proc->cow_files, node) {
++		dst_cow = kmalloc(sizeof(struct fbmm_cow_list_entry), GFP_KERNEL);
++		if (!dst_cow) {
++			pr_err("fbmm_copy: Could not allocate dst_cow!\n");
++			return -1;
++		}
++
++		get_fbmm_file(src_cow->file);
++		dst_cow->file = src_cow->file;
++
++		list_add(&dst_cow->node, &dst_tsk->fbmm_proc->cow_files);
++	}
+ 
+-	return mtree_store(&fbmm_proc_mt, dst, new_proc, GFP_KERNEL);
++	return 0;
+ }
+ 
++/*
++ * fbmm_add_cow_file() - 
++ */
++void fbmm_add_cow_file(struct task_struct *new_tsk, struct task_struct *old_tsk,
++		struct file *file, unsigned long start)
++{
++	struct fbmm_proc *new_proc;
++	struct fbmm_proc *old_proc;
++	struct fbmm_file *fbmm_file;
++	struct fbmm_cow_list_entry *cow_entry;
++	unsigned long search_start = start + 1;
++
++	new_proc = new_tsk->fbmm_proc;
++	old_proc = old_tsk->fbmm_proc;
++	if (!new_proc) {
++		pr_err("fbmm_add_cow_file: new_proc not valid!\n");
++		return;
++	}
++	if (!old_proc) {
++		pr_err("fbmm_add_cow_file: old_proc not valid!\n");
++		return;
++	}
++
++	// Find the fbmm_file that corresponds with the struct file
++	// fbmm files can overlap, so make sure to find the one that corresponds
++	// to this file
++	do {
++		fbmm_file = mt_prev(&old_proc->files_mt, search_start, 0);
++		if (!fbmm_file || fbmm_file->va_end <= start) {
++			pr_err("fbmm_add_cow_file: Could not find fbmm_file\n");
++			return;
++		}
++		search_start = fbmm_file->va_start;
++	} while (fbmm_file->f != file);
++
++	cow_entry = kmalloc(sizeof(struct fbmm_cow_list_entry), GFP_KERNEL);
++	if (!cow_entry) {
++		pr_err("fbmm_add_cow_file: Could not allocate cow_entry!\n");
++		return;
++	}
++
++	get_fbmm_file(fbmm_file);
++	cow_entry->file = fbmm_file;
++
++	list_add(&cow_entry->node, &new_proc->cow_files);
++}
+ ///////////////////////////////////////////////////////////////////////////////
+ // MFS Helper Functions
+ 
+@@ -763,7 +839,7 @@ static ssize_t fbmm_mnt_dir_read(struct file *file, char __user *ubuf,
+ 	}
+ 
+ 	// See if the selected task has an entry in the maple tree
+-	proc = mtree_load(&fbmm_proc_mt, task->tgid);
++	proc = task->fbmm_proc;
+ 	if (proc)
+ 		len = sprintf(buffer, "%s\n", proc->mnt_dir_str);
+ 	else
+@@ -818,11 +894,13 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
+ 		clear_entry = false;
+ 
+ 	if (!clear_entry) {
+-		proc = mtree_load(&fbmm_proc_mt, task->tgid);
++		proc = task->fbmm_proc;
+ 
+ 		if (!proc) {
+-			proc = fbmm_create_new_proc(buffer, task->tgid);
+-			ret = mtree_store(&fbmm_proc_mt, task->tgid, proc, GFP_KERNEL);
++			proc = fbmm_create_new_proc(buffer);
++			task->fbmm_proc = proc;
++			if (!proc)
++				ret = -ENOMEM;
+ 		} else {
+ 			proc->mnt_dir_str = buffer;
+ 			ret = kern_path(buffer, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
+@@ -833,7 +911,7 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
+ 		kfree(buffer);
+ 
+ 		// If the previous entry stored a value, free it
+-		proc = mtree_erase(&fbmm_proc_mt, task->tgid);
++		proc = task->fbmm_proc;
+ 		if (proc)
+ 			fbmm_put_proc(proc);
+ 	}
+diff --git a/mm/gup.c b/mm/gup.c
+index e16ba75a21dc..288135073947 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -1517,7 +1517,7 @@ long populate_vma_page_range(struct vm_area_struct *vma,
+ 	if ((vma->vm_flags & (VM_WRITE | VM_SHARED)) == VM_WRITE)
+ 		gup_flags |= FOLL_WRITE;
+     /* We DO want to dirty writeable pages if they aare for FOM though */
+-	else if ((vma->vm_flags & VM_WRITE) && use_file_based_mm(current->tgid)) {
++	else if ((vma->vm_flags & VM_WRITE) && use_file_based_mm(current)) {
+ 		gup_flags |= FOLL_WRITE;
+ 	}
+ 
+diff --git a/mm/mmap.c b/mm/mmap.c
+index af52858d5ddf..90161400a9eb 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -260,11 +260,11 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
+ 		goto out;
+ 
+ 	/* Ok, looks good - let it rip. */
+-	if (use_file_based_mm(current->tgid)) {
++	if (use_file_based_mm(current)) {
+ 		vm_flags_t vm_flags = VM_FBMM;
+ 		unsigned long prot = PROT_READ | PROT_WRITE;
+ 		unsigned long pgoff = 0;
+-		struct file *f = fbmm_get_file(oldbrk, newbrk-oldbrk, prot, 0, false, &pgoff);
++		struct file *f = fbmm_get_file(current, oldbrk, newbrk-oldbrk, prot, 0, false, &pgoff);
+ 
+ 		if (f && !IS_ERR(f)) {
+ 			vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
+@@ -1299,22 +1299,15 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 		return -ENOMEM;
+ 
+ 	// See if we want to use file only memory
+-	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current->tgid)) {
++	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current)) {
+ 		addr = fbmm_get_unmapped_area(addr, len, pgoff, flags);
+ 
+ 		if (!IS_ERR_VALUE(addr)) {
+-			file = fbmm_get_file(addr, len, prot, flags, true, &pgoff);
++			file = fbmm_get_file(current, addr, len, prot, flags, true, &pgoff);
+ 
+ 			if (file && !IS_ERR(file)) {
+ 				created_fbmm_file = true;
+ 				flags = flags & ~MAP_ANONYMOUS;
+-
+-				// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
+-				// the system doesn't save the writes to anonymous memory
+-				if (flags & MAP_PRIVATE) {
+-					flags = flags & ~MAP_PRIVATE;
+-					flags = flags | MAP_SHARED;
+-				}
+ 			} else {
+ 				pr_err("Failed to create fbmm file: %ld %px\n", (long)file, file);
+ 				file = NULL;
+@@ -2582,7 +2575,7 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
+ 	if (!vma)
+ 		return 0;
+ 
+-	fbmm_munmap(current->tgid, start, end - start);
++	fbmm_munmap(current, start, end - start);
+ 	return do_mas_align_munmap(mas, vma, mm, start, end, uf, downgrade);
+ }
+ 
+diff --git a/mm/rmap.c b/mm/rmap.c
+index 648e9af1bc9d..9705ddcf7189 100644
+--- a/mm/rmap.c
++++ b/mm/rmap.c
+@@ -1456,6 +1456,7 @@ void page_remove_rmap(struct page *page,
+ 
+ 	munlock_vma_page(page, vma, compound);
+ }
++EXPORT_SYMBOL_GPL(page_remove_rmap);
+ 
+ /*
+  * @arg: enum ttu_flags will be passed to this argument
+-- 
+2.49.0
+

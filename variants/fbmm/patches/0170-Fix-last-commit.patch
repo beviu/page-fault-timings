@@ -1,0 +1,28 @@
+From ab742671c0e682d4273bb9e83f408fec86ab28cb Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Fri, 1 Nov 2024 15:52:25 -0500
+Subject: [PATCH 170/179] Fix last commit
+
+page->page_offset is cleared after we call tieredmmfs_return_page,
+so we need to delete the dax entry before that
+---
+ TieredMMFS/fs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/TieredMMFS/fs.c b/TieredMMFS/fs.c
+index fc8d22ddd8ea..13404d1ba1ee 100644
+--- a/TieredMMFS/fs.c
++++ b/TieredMMFS/fs.c
+@@ -227,8 +227,8 @@ static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len
+         // which have higher priority than inode_info->map_lock, so we have to give it up
+         write_unlock(&inode_info->map_lock);
+ 
+-        tieredmmfs_return_page(sbi, page);
+         dax_delete_mapping_entry(inode_info->mapping, page->page_offset << (sbi->page_shift - PAGE_SHIFT));
++        tieredmmfs_return_page(sbi, page);
+ 
+         if (!next_node)
+             break;
+-- 
+2.49.0
+

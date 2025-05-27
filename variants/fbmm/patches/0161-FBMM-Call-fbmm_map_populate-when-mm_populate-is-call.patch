@@ -1,0 +1,53 @@
+From 3694a7beb772482d344a0f94c3e2544dd6ed9120 Mon Sep 17 00:00:00 2001
+From: Bijan Tabatabai <btabatabai@wisc.edu>
+Date: Wed, 27 Mar 2024 13:38:48 -0500
+Subject: [PATCH 161/179] FBMM: Call fbmm_map_populate when mm_populate is
+ called
+
+---
+ include/linux/mm.h | 2 ++
+ mm/file_based_mm.c | 4 ++--
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 5894d744125d..1ab2cfefb94d 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -29,6 +29,7 @@
+ #include <linux/pgtable.h>
+ #include <linux/kasan.h>
+ #include <linux/memremap.h>
++#include <linux/file_based_mm.h>
+ 
+ struct mempolicy;
+ struct anon_vma;
+@@ -2879,6 +2880,7 @@ extern int __mm_populate(unsigned long addr, unsigned long len,
+ static inline void mm_populate(unsigned long addr, unsigned long len)
+ {
+ 	/* Ignore errors */
++	fbmm_populate_file(addr, len);
+ 	(void) __mm_populate(addr, len, 1);
+ }
+ #else
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 3cd76b9a37fe..67ffd1c13635 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -292,12 +292,12 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
+ 	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+ 	// Create the proc data structure if it does not already exist
+ 	if (!proc) {
+-		BUG();
++		return;
+ 	}
+ 
+ 	file = mt_prev(&proc->files_mt, start, 0);
+ 	if (!file || file->va_end <= start) {
+-		BUG();
++		return;
+ 	}
+ 
+ 	offset = start - file->va_start;
+-- 
+2.49.0
+

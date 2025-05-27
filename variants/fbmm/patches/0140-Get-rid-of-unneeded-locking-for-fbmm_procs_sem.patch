@@ -1,0 +1,84 @@
+From bc3121f5358454b03867c7258bab9e7d48aeb7b2 Mon Sep 17 00:00:00 2001
+From: BIJAN TABATABAI <btabatabai@wisc.edu>
+Date: Fri, 15 Dec 2023 13:40:11 -0600
+Subject: [PATCH 140/179] Get rid of unneeded locking for fbmm_procs_sem
+
+Only use that to synchronize the mapping rb_tree
+---
+ mm/file_based_mm.c | 12 ------------
+ 1 file changed, 12 deletions(-)
+
+diff --git a/mm/file_based_mm.c b/mm/file_based_mm.c
+index 89ad6745e5ef..a765085a9d46 100644
+--- a/mm/file_based_mm.c
++++ b/mm/file_based_mm.c
+@@ -213,9 +213,7 @@ static int fbmm_prealloc_task(void *data) {
+ 
+ 		// Create the files
+ 		for (int i = 0; i < NUM_FILES_TO_CREATE; i++) {
+-			down_read(&fbmm_procs_sem);
+ 			file = file_open_root(&proc->mnt_dir_path, "", OPEN_FLAGS, OPEN_MODE);
+-			up_read(&fbmm_procs_sem);
+ 			if (IS_ERR(file))
+ 				goto put_proc;
+ 
+@@ -414,10 +412,8 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
+ 	// just make one
+ 	f = fbmm_get_prealloc_file(proc);
+ 	if (!f) {
+-		down_read(&fbmm_procs_sem);
+ 		path = &proc->mnt_dir_path;
+ 		f = file_open_root(path, "", open_flags, open_mode);
+-		up_read(&fbmm_procs_sem);
+ 		if (IS_ERR(f)) {
+ 			return f;
+ 		}
+@@ -448,9 +444,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
+ 	u64 start_time = rdtsc();
+ 	u64 end_time;
+ 
+-	down_read(&fbmm_procs_sem);
+ 	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+-	up_read(&fbmm_procs_sem);
+ 	// Create the proc data structure if it does not already exist
+ 	if (!proc) {
+ 		BUG();
+@@ -505,9 +499,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+ 	u64 start_time = rdtsc();
+ 	u64 end_time;
+ 
+-	down_read(&fbmm_procs_sem);
+ 	proc = mtree_load(&fbmm_proc_mt, pid);
+-	up_read(&fbmm_procs_sem);
+ 
+ 	if (!proc)
+ 		return 0;
+@@ -628,9 +620,7 @@ void fbmm_check_exiting_proc(pid_t pid) {
+ 	struct fbmm_proc *proc;
+ 	struct rb_node *node;
+ 
+-	down_read(&fbmm_procs_sem);
+ 	proc = mtree_erase(&fbmm_proc_mt, pid);
+-	up_read(&fbmm_procs_sem);
+ 
+ 	if (!proc)
+ 		return;
+@@ -1068,7 +1058,6 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
+ 	if (!ret)
+ 		clear_entry = false;
+ 
+-	down_write(&fbmm_procs_sem);
+ 	if (!clear_entry) {
+ 		proc = mtree_load(&fbmm_proc_mt, task->tgid);
+ 
+@@ -1089,7 +1078,6 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
+ 		if (proc)
+ 			fbmm_put_proc(proc);
+ 	}
+-	up_write(&fbmm_procs_sem);
+ 
+ 	put_task_struct(task);
+ 	if (ret)
+-- 
+2.49.0
+
