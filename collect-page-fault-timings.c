@@ -276,11 +276,11 @@ static bool do_iteration(uint64_t length, int access, bool with_userfaultfd,
     }
   }
 
-  for (byte = memory; (uintptr_t)byte - (uintptr_t)memory < length;
-       byte += page_size) {
-    if (access == (PROT_READ | PROT_WRITE))
-      *byte;
-
+  if (throughput && access != (PROT_READ | PROT_WRITE)) {
+    // When measuring throughput and there is nothing to do before doing a
+    // page fault, {timespec,timestamp}_page_fault becomes the last fault's
+    // {timespec,timestamp}_end. This makes the throughput calculation more
+    // correct.
     if (wall_clock) {
       if (clock_gettime(CLOCK_MONOTONIC, &timespec_page_fault) == -1) {
         perror("clock_gettime(CLOCK_MONOTONIC)");
@@ -289,6 +289,24 @@ static bool do_iteration(uint64_t length, int access, bool with_userfaultfd,
       }
     } else {
       timestamp_page_fault = rdtsc_serialize();
+    }
+  }
+
+  for (byte = memory; (uintptr_t)byte - (uintptr_t)memory < length;
+       byte += page_size) {
+    if (access == (PROT_READ | PROT_WRITE))
+      *byte;
+
+    if (!throughput || access == (PROT_READ | PROT_WRITE)) {
+      if (wall_clock) {
+        if (clock_gettime(CLOCK_MONOTONIC, &timespec_page_fault) == -1) {
+          perror("clock_gettime(CLOCK_MONOTONIC)");
+          munmap(memory, length);
+          return false;
+        }
+      } else {
+        timestamp_page_fault = rdtsc_serialize();
+      }
     }
 
     if (fast_tracepoints_dir_fd == -1) {
@@ -323,9 +341,15 @@ static bool do_iteration(uint64_t length, int access, bool with_userfaultfd,
       duration =
           timespec_end.tv_nsec - timespec_page_fault.tv_nsec +
           (timespec_end.tv_sec - timespec_page_fault.tv_sec) * 1000000000LL;
+
+      if (throughput && access != (PROT_READ | PROT_WRITE))
+        timespec_page_fault = timespec_end;
     } else {
       timestamp_end = rdtsc_serialize();
       duration = timestamp_end - timestamp_page_fault;
+
+      if (throughput && access != (PROT_READ | PROT_WRITE))
+        timestamp_page_fault = timestamp_end;
     }
 
     if (throughput) {
