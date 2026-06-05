@@ -352,7 +352,7 @@ int main(int argc, char **argv) {
 
   arg0 = argv[0] ? argv[0] : "collect-page-fault-timings";
 
-  while ((opt = getopt_long(argc, argv, "s:l:i:t:a:uch", long_options, NULL)) !=
+  while ((opt = getopt_long(argc, argv, "l:i:t:a:ucnh", long_options, NULL)) !=
          -1) {
     switch (opt) {
     case 'l':
