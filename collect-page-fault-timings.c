@@ -26,6 +26,7 @@
 
 static bool no_msg_received = false;
 static bool wall_clock = false;
+static bool throughput = false;
 static int fast_tracepoints_dir_fd = -1;
 static int userfaultfd_fd;
 static ssize_t page_size;
@@ -158,6 +159,8 @@ static void print_usage(const char *arg0) {
       "  -n, --no-msg-received        disable the msg_received timing\n"
       "  -w, --wall-clock             measure wall-clock time (in "
       "nanoseconds)\n"
+      "  -T, --throughput             output throughput (number of faults per "
+      "second or per billion of cycles)\n"
       "  -h, --help                   display this help and exit\n",
       arg0);
 }
@@ -195,21 +198,27 @@ static bool list_fast_tracepoints() {
 static void print_columns() {
   int i = 0;
 
-  fputs("end", stdout);
+  if (throughput) {
+    fputs("throughput\n", stdout);
+  } else if (wall_clock) {
+    fputs("end\n", stdout);
+  } else {
+    fputs("end", stdout);
 
-  if (!wall_clock) {
-    if (!no_msg_received)
-      fputs(",msg_received", stdout);
+    if (!wall_clock) {
+      if (!no_msg_received)
+        fputs(",msg_received", stdout);
 
-    if (fast_tracepoints_dir_fd != -1) {
-      fputs(",isr_entry,iret", stdout);
+      if (fast_tracepoints_dir_fd != -1) {
+        fputs(",isr_entry,iret", stdout);
 
-      while (fast_tracepoints[i] != NULL)
-        fprintf(stdout, ",%s", fast_tracepoints[i++]);
+        while (fast_tracepoints[i] != NULL)
+          fprintf(stdout, ",%s", fast_tracepoints[i++]);
+      }
     }
-  }
 
-  fputs("\n", stdout);
+    fputs("\n", stdout);
+  }
 }
 
 static const struct option long_options[] = {
@@ -221,6 +230,7 @@ static const struct option long_options[] = {
     {"userfaultfd-same-cpus", no_argument, 0, 'c'},
     {"no-msg_received", no_argument, 0, 'n'},
     {"wall-clock", no_argument, 0, 'w'},
+    {"throughput", no_argument, 0, 'T'},
     {"help", no_argument, 0, 'h'},
     {0, 0, 0, 0}};
 
@@ -236,6 +246,9 @@ static bool do_iteration(uint64_t length, int access, bool with_userfaultfd,
   uint8_t byte_copy;
   struct timespec timespec_end;
   uint64_t timestamp_end;
+  uint64_t duration;
+  uint64_t accumulator_duration = 0;
+  uint64_t accumulator_faults = 0;
   uint64_t timestamp_msg_received_copy;
   int i;
   uint64_t timestamp;
@@ -307,40 +320,55 @@ static bool do_iteration(uint64_t length, int access, bool with_userfaultfd,
         return false;
       }
 
-      printf("%llu\n", timespec_end.tv_nsec - timespec_page_fault.tv_nsec +
-                           (timespec_end.tv_sec - timespec_page_fault.tv_sec) *
-                               1000000000LL);
+      duration =
+          timespec_end.tv_nsec - timespec_page_fault.tv_nsec +
+          (timespec_end.tv_sec - timespec_page_fault.tv_sec) * 1000000000LL;
     } else {
       timestamp_end = rdtsc_serialize();
+      duration = timestamp_end - timestamp_page_fault;
+    }
 
-      printf("%" PRIu64, timestamp_end - timestamp_page_fault);
+    if (throughput) {
+      accumulator_duration += duration;
 
-      if (!no_msg_received) {
-        timestamp_msg_received_copy =
-            atomic_load_explicit(&timestamp_msg_received, memory_order_relaxed);
-
-        if (timestamp_msg_received_copy > timestamp_page_fault)
-          printf(",%" PRIu64,
-                 timestamp_msg_received_copy - timestamp_page_fault);
-        else
-          fputc(',', stdout);
+      while (accumulator_duration >= 1000000000) {
+        printf("%" PRIu64 "\n", accumulator_faults);
+        accumulator_faults = 0;
+        accumulator_duration -= 1000000000;
       }
 
-      if (fast_tracepoints_dir_fd != -1) {
-        printf(",%" PRIu64 ",%" PRIu64,
-               timestamp_isr_entry - timestamp_page_fault,
-               timestamp_iret - timestamp_page_fault);
+      ++accumulator_faults;
+    } else {
+      printf("%" PRIu64, duration);
 
-        for (i = 0; fast_tracepoints[i] != NULL; ++i) {
-          if (!read_fast_tracepoint(fast_tracepoints[i], &timestamp)) {
-            munmap(memory, length);
-            return false;
-          }
-          /* Check if the tracepoint was hit. */
-          if (timestamp > timestamp_page_fault)
-            printf(",%" PRIu64, timestamp - timestamp_page_fault);
+      if (!wall_clock) {
+        if (!no_msg_received) {
+          timestamp_msg_received_copy = atomic_load_explicit(
+              &timestamp_msg_received, memory_order_relaxed);
+
+          if (timestamp_msg_received_copy > timestamp_page_fault)
+            printf(",%" PRIu64,
+                   timestamp_msg_received_copy - timestamp_page_fault);
           else
             fputc(',', stdout);
+        }
+
+        if (fast_tracepoints_dir_fd != -1) {
+          printf(",%" PRIu64 ",%" PRIu64,
+                 timestamp_isr_entry - timestamp_page_fault,
+                 timestamp_iret - timestamp_page_fault);
+
+          for (i = 0; fast_tracepoints[i] != NULL; ++i) {
+            if (!read_fast_tracepoint(fast_tracepoints[i], &timestamp)) {
+              munmap(memory, length);
+              return false;
+            }
+            /* Check if the tracepoint was hit. */
+            if (timestamp > timestamp_page_fault)
+              printf(",%" PRIu64, timestamp - timestamp_page_fault);
+            else
+              fputc(',', stdout);
+          }
         }
       }
 
@@ -350,6 +378,10 @@ static bool do_iteration(uint64_t length, int access, bool with_userfaultfd,
         atomic_store_explicit(&timestamp_msg_received, 0, memory_order_relaxed);
     }
   }
+
+  if (throughput && accumulator_duration != 0)
+    printf("%" PRIu64 "\n",
+           accumulator_faults * 1000000000 / accumulator_duration);
 
   munmap(memory, length);
 
@@ -382,8 +414,8 @@ int main(int argc, char **argv) {
 
   arg0 = argv[0] ? argv[0] : "collect-page-fault-timings";
 
-  while ((opt = getopt_long(argc, argv, "l:i:t:a:ucnwh", long_options, NULL)) !=
-         -1) {
+  while ((opt = getopt_long(argc, argv, "l:i:t:a:ucnwTh", long_options,
+                            NULL)) != -1) {
     switch (opt) {
     case 'l':
       cursor = optarg;
@@ -437,6 +469,9 @@ int main(int argc, char **argv) {
       goto out;
     case 'w':
       wall_clock = true;
+      break;
+    case 'T':
+      throughput = true;
       break;
     default:
       fprintf(stderr, "Try '%s --help' for more information.\n", arg0);
