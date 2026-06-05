@@ -231,8 +231,6 @@ static bool do_iteration(uint64_t length, int access, bool with_userfaultfd,
   int i;
   uint64_t timestamp;
 
-  print_columns();
-
   memory = mmap(NULL, length, access, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   if (memory == MAP_FAILED) {
     perror("mmap");
@@ -434,6 +432,8 @@ int main(int argc, char **argv) {
 
   if (fast_tracepoints_dir_fd != -1 && !list_fast_tracepoints())
     goto cleanup_fast_tracepoints_dir_fd;
+
+  print_columns();
 
   page_size = sysconf(_SC_PAGESIZE);
   if (page_size == -1) {
